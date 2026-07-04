@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Interne Projekt-Doku (Workspace, nicht fürs Repo)
+CLAUDE.md
+MEMORY.md
+TODO.md
+
+# Claude-Code-Arbeitsdateien / lokaler Dev-Server
+.claude/
