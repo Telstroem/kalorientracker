@@ -3,6 +3,9 @@
 Schlanke Kalorien- und Gewichts-Tracking-App als PWA — komplett offline, ohne Konto,
 alle Daten bleiben auf dem Gerät.
 
+**Live:** https://telstroem.github.io/kalorientracker/ — auf dem iPhone/iPad in
+Safari öffnen → Teilen → „Zum Home-Bildschirm", dann startet die App im Vollbild.
+
 ## Was die App kann
 
 - **Heute:** Kalorienring, Tagesdefizit, Makros (Proteinziel prominent), vier
