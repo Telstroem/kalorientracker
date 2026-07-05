@@ -474,13 +474,43 @@ textarea { resize: vertical; }
   padding: 12px 0;
   border-bottom: 0.5px solid var(--border);
 }
-.ai-check { display: flex; align-items: flex-start; padding-top: 10px; }
-.ai-check input { width: 20px; height: 20px; accent-color: var(--accent); }
-.ai-fields { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.ai-toggle {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  border-radius: 50%;
+  border: 2px solid var(--muted);
+  background: transparent;
+  color: transparent;
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  margin-top: 4px;
+  flex-shrink: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.ai-toggle.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.ai-item.ai-off .ai-fields { opacity: 0.4; }
+.ai-fields { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; transition: opacity 0.15s ease; }
+.ai-menge-row { display: flex; gap: 6px; align-items: center; }
+.ai-menge-row .ai-menge { flex: 1; min-width: 0; }
+.ai-menge-row .chip { flex-shrink: 0; padding: 9px 12px; font-weight: 600; }
 .ai-macros { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .ai-macros label { font-size: 0.7rem; color: var(--muted); }
 .ai-macros input { padding: 7px 8px; margin-top: 3px; font-size: 0.85rem; }
 #ai-text { margin-bottom: 12px; }
+
+.scale-row { display: flex; align-items: center; gap: 8px; }
+.scale-row .scale-label { font-size: 0.82rem; color: var(--muted); }
+.scale-row .chip { padding: 9px 14px; font-weight: 600; }
 
 /* ==================== Onboarding ==================== */
 

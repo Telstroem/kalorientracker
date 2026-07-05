@@ -556,7 +556,7 @@
         <button class="btn danger" data-action="delete-all">Alle Daten löschen</button>
       </div>
 
-      <p class="hint center">Kalorientracker · Version 1.0 · Daten bleiben auf dem Gerät</p>`;
+      <p class="hint center">Kalorientracker · Version 1.1 · Daten bleiben auf dem Gerät</p>`;
 
     $('#view-settings').innerHTML = html;
 
@@ -990,12 +990,19 @@
     if (ai.items) {
       html += '<div class="list-section">Vorschläge – prüfen und anpassen</div><div class="ai-items">';
       ai.items.forEach((it, i) => {
+        const sel = it.selected !== false;
+        const qty = parseQtyFromText(it.menge);
         html += `
-        <div class="ai-item" data-ai-idx="${i}">
-          <label class="ai-check"><input type="checkbox" class="ai-use" checked></label>
+        <div class="ai-item ${sel ? '' : 'ai-off'}" data-ai-idx="${i}" data-qty="${qty !== null ? qty : ''}">
+          <button type="button" class="ai-toggle ${sel ? 'on' : ''}" data-action="ai-toggle" data-idx="${i}"
+            aria-pressed="${sel}" aria-label="Vorschlag ${sel ? 'abwählen' : 'auswählen'}">✓</button>
           <div class="ai-fields">
             <input type="text" class="ai-name" value="${esc(it.name)}" placeholder="Name">
-            <input type="text" class="ai-menge" value="${esc(it.menge)}" placeholder="Menge">
+            <div class="ai-menge-row">
+              <input type="text" class="ai-menge" value="${esc(it.menge)}" placeholder="Menge">
+              <button type="button" class="chip" data-action="ai-scale" data-factor="0.5">× ½</button>
+              <button type="button" class="chip" data-action="ai-scale" data-factor="2">× 2</button>
+            </div>
             <div class="ai-macros">
               <label>kcal<input type="number" class="ai-kcal" inputmode="numeric" value="${it.kcal}"></label>
               <label>P (g)<input type="text" class="ai-p" inputmode="decimal" value="${esc(String(it.p).replace('.', ','))}"></label>
@@ -1005,9 +1012,76 @@
           </div>
         </div>`;
       });
-      html += `</div><button class="btn primary full" data-action="ai-accept">Ausgewählte übernehmen</button>`;
+      const count = ai.items.filter(it => it.selected !== false).length;
+      html += `</div><button class="btn primary full" data-action="ai-accept" ${count === 0 ? 'disabled' : ''}>${aiAcceptLabel(count)}</button>`;
     }
     return html;
+  }
+
+  function aiAcceptLabel(count) {
+    if (count === 0) return 'Nichts ausgewählt';
+    return `${NF0.format(count)} ${count === 1 ? 'Eintrag' : 'Einträge'} übernehmen`;
+  }
+
+  function updateAiAcceptButton() {
+    const btn = document.querySelector('[data-action="ai-accept"]');
+    if (!btn || !sheet || !sheet.ai || !sheet.ai.items) return;
+    const count = sheet.ai.items.filter(it => it.selected !== false).length;
+    btn.disabled = count === 0;
+    btn.textContent = aiAcceptLabel(count);
+  }
+
+  // --- Mengen-Umrechner ---
+
+  const QTY_RE = /\d+(?:[.,]\d+)?/;
+
+  function parseQtyFromText(text) {
+    const m = String(text || '').match(QTY_RE);
+    return m ? parseGermanFloat(m[0]) : null;
+  }
+
+  function formatQtyNumber(n) {
+    return String(Math.round(n * 10) / 10).replace('.', ',');
+  }
+
+  // Ersetzt die erste Zahl im Mengentext durch die skalierte; null, wenn keine Zahl vorhanden.
+  function scaleQuantityText(text, factor) {
+    const s = String(text || '');
+    const m = s.match(QTY_RE);
+    if (!m) return null;
+    const q = parseGermanFloat(m[0]);
+    if (q === null || q <= 0) return null;
+    return s.replace(QTY_RE, formatQtyNumber(q * factor));
+  }
+
+  // Skaliert kcal/P/F/KH-Felder proportional von ihren AKTUELLEN Werten aus.
+  function scaleNutrientInputs(fields, factor) {
+    const kcalEl = fields.kcal;
+    kcalEl.value = String(Math.max(0, Math.round((parseFloat(kcalEl.value) || 0) * factor)));
+    [fields.p, fields.f, fields.kh].forEach(el => {
+      const v = parseGermanFloat(el.value) || 0;
+      el.value = formatQtyNumber(Math.max(0, v * factor));
+    });
+  }
+
+  function aiRowFields(row) {
+    return {
+      kcal: row.querySelector('.ai-kcal'),
+      p: row.querySelector('.ai-p'),
+      f: row.querySelector('.ai-f'),
+      kh: row.querySelector('.ai-kh')
+    };
+  }
+
+  function scaleAiRow(row, factor) {
+    scaleNutrientInputs(aiRowFields(row), factor);
+    const mengeEl = row.querySelector('.ai-menge');
+    const scaled = scaleQuantityText(mengeEl.value, factor);
+    if (scaled !== null) {
+      mengeEl.value = scaled;
+      const q = parseQtyFromText(scaled);
+      row.dataset.qty = q !== null ? String(q) : '';
+    }
   }
 
   // --- Bearbeiten ---
@@ -1022,6 +1096,11 @@
         <label class="span2">Menge (Anzeige)
           <input type="text" id="edit-amount" value="${esc(e.amount || '')}" placeholder="z. B. 150 g">
         </label>
+        <div class="span2 scale-row">
+          <span class="scale-label">Menge anpassen:</span>
+          <button type="button" class="chip" data-action="edit-scale" data-factor="0.5">× ½</button>
+          <button type="button" class="chip" data-action="edit-scale" data-factor="2">× 2</button>
+        </div>
         <label>Kalorien (kcal)
           <input type="number" inputmode="numeric" id="edit-kcal" min="0" value="${e.kcal}">
         </label>
@@ -1079,6 +1158,18 @@
     if (aiText) {
       aiText.addEventListener('input', () => { sheet.ai.text = aiText.value; });
     }
+    // Mengenzahl im KI-Vorschlag editiert → Nährwerte proportional mitrechnen
+    document.querySelectorAll('.ai-item .ai-menge').forEach(mengeEl => {
+      mengeEl.addEventListener('change', () => {
+        const row = mengeEl.closest('.ai-item');
+        const oldQty = parseGermanFloat(row.dataset.qty || '');
+        const newQty = parseQtyFromText(mengeEl.value);
+        if (oldQty !== null && oldQty > 0 && newQty !== null && newQty > 0 && newQty !== oldQty) {
+          scaleNutrientInputs(aiRowFields(row), newQty / oldQty);
+        }
+        row.dataset.qty = newQty !== null ? String(newQty) : '';
+      });
+    });
   }
 
   function updateFoodPreview() {
@@ -1107,6 +1198,7 @@
     try {
       const items = await AI.analyze({ apiKey: data.settings.apiKey, text: ai.text, image: ai.image });
       if (!sheet || !sheet.ai) return;
+      items.forEach(it => { it.selected = true; });
       sheet.ai.items = items;
     } catch (err) {
       if (!sheet || !sheet.ai) return;
@@ -1120,7 +1212,9 @@
     const rows = document.querySelectorAll('.ai-item');
     let added = 0;
     rows.forEach(row => {
-      if (!row.querySelector('.ai-use').checked) return;
+      const idx = parseInt(row.dataset.aiIdx, 10);
+      const item = sheet.ai.items[idx];
+      if (!item || item.selected === false) return;
       const name = row.querySelector('.ai-name').value.trim();
       const menge = row.querySelector('.ai-menge').value.trim();
       const kcal = parseFloat(row.querySelector('.ai-kcal').value) || 0;
@@ -1250,6 +1344,32 @@
         sheet.ai.image = null;
         renderSheet();
         break;
+      case 'ai-toggle': {
+        const idx = parseInt(target.dataset.idx, 10);
+        const item = sheet.ai.items[idx];
+        if (!item) break;
+        item.selected = item.selected === false;
+        const row = target.closest('.ai-item');
+        row.classList.toggle('ai-off', !item.selected);
+        target.classList.toggle('on', item.selected);
+        target.setAttribute('aria-pressed', String(item.selected));
+        target.setAttribute('aria-label', `Vorschlag ${item.selected ? 'abwählen' : 'auswählen'}`);
+        updateAiAcceptButton();
+        break;
+      }
+      case 'ai-scale': {
+        const row = target.closest('.ai-item');
+        if (row) scaleAiRow(row, parseFloat(target.dataset.factor));
+        break;
+      }
+      case 'edit-scale': {
+        const factor = parseFloat(target.dataset.factor);
+        scaleNutrientInputs({ kcal: $('#edit-kcal'), p: $('#edit-p'), f: $('#edit-f'), kh: $('#edit-kh') }, factor);
+        const amountEl = $('#edit-amount');
+        const scaled = scaleQuantityText(amountEl.value, factor);
+        if (scaled !== null) amountEl.value = scaled;
+        break;
+      }
       case 'ai-accept': acceptAiItems(); break;
 
       // Einträge
