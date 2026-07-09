@@ -4,6 +4,8 @@
   --accent: #2e9e6b;
   --accent-soft: rgba(46, 158, 107, 0.14);
   --warn: #d96545;
+  --caution: #c9a11c;
+  --over: #b95e14;
   --bg: #f2f3f6;
   --card: #ffffff;
   --text: #1b1d22;
@@ -20,6 +22,8 @@
     --accent: #3cbf82;
     --accent-soft: rgba(60, 191, 130, 0.16);
     --warn: #e57a58;
+    --caution: #d9b649;
+    --over: #d07a2e;
     --bg: #0e0f12;
     --card: #1a1c21;
     --text: #eceef1;
@@ -36,6 +40,8 @@
   --accent: #3cbf82;
   --accent-soft: rgba(60, 191, 130, 0.16);
   --warn: #e57a58;
+  --caution: #d9b649;
+  --over: #d07a2e;
   --bg: #0e0f12;
   --card: #1a1c21;
   --text: #eceef1;
@@ -131,6 +137,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 
 input, select, textarea {
   font: inherit;
+  font-size: 16px; /* iOS Safari zoomt bei Feldern < 16 px in den Fokus */
   color: var(--text);
   background: var(--input-bg);
   border: none;
@@ -150,6 +157,25 @@ textarea { resize: vertical; }
 
 .inline-form { display: flex; gap: 10px; }
 .inline-form input { flex: 1; }
+
+.weight-date { margin-top: 10px; font-size: 0.85rem; color: var(--muted); }
+.date-tap {
+  position: relative;
+  display: inline-block;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 2px;
+}
+.date-tap input[type="date"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  padding: 0;
+  border-radius: 0;
+}
 
 .form-grid {
   display: grid;
@@ -208,6 +234,7 @@ textarea { resize: vertical; }
 .ring { width: min(230px, 62vw); height: auto; margin: 4px auto 8px; display: block; }
 .ring-big { font-size: 44px; font-weight: 700; fill: var(--text); letter-spacing: -1px; }
 .ring-sub { font-size: 14px; fill: var(--muted); }
+.ring-sub2 { font-size: 12px; fill: var(--muted); }
 .ring-progress { transition: stroke-dasharray 0.4s ease; }
 
 .stat-row {
@@ -288,6 +315,8 @@ textarea { resize: vertical; }
 .axis-label { fill: var(--muted); font-size: 9.5px; }
 .target-line { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 5 4; }
 .dot { fill: var(--card); stroke: var(--accent); stroke-width: 1.5; opacity: 0.85; }
+.milestone-dot { fill: var(--accent); stroke: var(--card); stroke-width: 1.5; }
+.milestone-label { fill: var(--accent); font-size: 9px; font-weight: 600; }
 .bar { fill: var(--accent); opacity: 0.85; }
 .bar-over { fill: var(--warn); }
 
@@ -505,7 +534,7 @@ textarea { resize: vertical; }
 .ai-menge-row .chip { flex-shrink: 0; padding: 9px 12px; font-weight: 600; }
 .ai-macros { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .ai-macros label { font-size: 0.7rem; color: var(--muted); }
-.ai-macros input { padding: 7px 8px; margin-top: 3px; font-size: 0.85rem; }
+.ai-macros input { padding: 7px 5px; margin-top: 3px; text-align: center; }
 #ai-text { margin-bottom: 12px; }
 
 .scale-row { display: flex; align-items: center; gap: 8px; }

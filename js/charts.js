@@ -5,34 +5,50 @@ const Charts = (() => {
   const NF0 = new Intl.NumberFormat('de-DE', { maximumFractionDigits: 0 });
   const NF1 = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
-  // Kalorienring: gegessen vs. Ziel, Restkalorien in der Mitte.
-  function ring(eaten, goal) {
+  // Kalorienring, dreistufig: bis Ziel grün, über Ziel aber unter TDEE gelb,
+  // über TDEE dunkles Orange. Zahl in der Mitte je Stufe.
+  function ring(eaten, goal, tdee) {
     const size = 220, cx = size / 2, cy = size / 2, r = 92, stroke = 15;
     const circumference = 2 * Math.PI * r;
     const safeGoal = Math.max(goal, 1);
+    const safeTdee = Math.max(tdee || safeGoal, safeGoal);
     const ratio = Math.min(eaten / safeGoal, 1);
-    const over = eaten > safeGoal;
-    const rest = Math.round(safeGoal - eaten);
     const dash = circumference * ratio;
-    const progressColor = over ? 'var(--warn)' : 'var(--accent)';
-    const bigText = NF0.format(Math.abs(rest));
-    const subText = over ? 'kcal über Ziel' : 'kcal übrig';
+
+    let progressColor, bigText, subText, subText2 = '';
+    if (eaten <= safeGoal) {
+      progressColor = 'var(--accent)';
+      bigText = NF0.format(Math.round(safeGoal - eaten));
+      subText = 'kcal übrig';
+    } else if (eaten <= safeTdee) {
+      progressColor = 'var(--caution)';
+      bigText = NF0.format(Math.round(eaten - safeGoal));
+      subText = 'kcal über Ziel';
+      subText2 = 'noch im Defizit';
+    } else {
+      progressColor = 'var(--over)';
+      bigText = NF0.format(Math.round(eaten - safeTdee));
+      subText = 'kcal Überschuss';
+    }
+
     const progress = eaten > 0
       ? `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${progressColor}" stroke-width="${stroke}"
         stroke-linecap="round" stroke-dasharray="${dash.toFixed(1)} ${circumference.toFixed(1)}"
         transform="rotate(-90 ${cx} ${cy})" class="ring-progress"/>`
       : '';
-    return `<svg viewBox="0 0 ${size} ${size}" class="ring" role="img" aria-label="${bigText} ${subText}">
+    return `<svg viewBox="0 0 ${size} ${size}" class="ring" role="img" aria-label="${bigText} ${subText}${subText2 ? ' – ' + subText2 : ''}">
       <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--ring-track)" stroke-width="${stroke}"/>
       ${progress}
       <text x="${cx}" y="${cy - 4}" text-anchor="middle" class="ring-big">${bigText}</text>
       <text x="${cx}" y="${cy + 24}" text-anchor="middle" class="ring-sub">${subText}</text>
+      ${subText2 ? `<text x="${cx}" y="${cy + 42}" text-anchor="middle" class="ring-sub2">${subText2}</text>` : ''}
     </svg>`;
   }
 
-  // Gewichtsdiagramm: Punkte = Rohwerte, Linie = 7-Tage-Trend, gestrichelt = Ziel.
+  // Gewichtsdiagramm: Punkte = Rohwerte, Linie = 7-Tage-Trend, gestrichelt = Ziel,
+  // optionale Meilenstein-Marker [{ threshold, key, trend }] an den Trend-Punkten.
   // points: [{ key, weight, trend }] aufsteigend, target: Zielgewicht oder null.
-  function weightChart(points, target) {
+  function weightChart(points, target, marks) {
     const w = 340, h = 190, padL = 38, padR = 10, padT = 12, padB = 24;
     if (points.length === 0) {
       return `<svg viewBox="0 0 ${w} ${h}" class="chart">
@@ -80,6 +96,22 @@ const Charts = (() => {
     points.forEach(p => {
       svg += `<circle cx="${x(p.key).toFixed(1)}" cy="${y(p.weight).toFixed(1)}" r="3" class="dot"/>`;
     });
+
+    // Meilenstein-Marker: dezente Punkte am Trend, nur die letzten 4 beschriftet
+    if (Array.isArray(marks) && marks.length) {
+      const visible = marks
+        .filter(m => m.key >= points[0].key && m.key <= points[points.length - 1].key)
+        .sort((a, b) => a.key < b.key ? -1 : 1);
+      const labelFrom = Math.max(0, visible.length - 4);
+      visible.forEach((m, i) => {
+        const mx = x(m.key), my = y(m.trend);
+        svg += `<circle cx="${mx.toFixed(1)}" cy="${my.toFixed(1)}" r="4" class="milestone-dot"/>`;
+        if (i >= labelFrom) {
+          const ly = Math.max(padT + 8, my - 9);
+          svg += `<text x="${mx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle" class="milestone-label">&lt; ${NF0.format(m.threshold)} kg</text>`;
+        }
+      });
+    }
 
     svg += '</svg>';
     return svg;

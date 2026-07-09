@@ -49,6 +49,7 @@
   let currentDay = todayKey();
   let activeTab = 'today';
   let weightRange = '3m';
+  let weightDate = todayKey();
   let sheet = null;   // { meal, tab, query, food, editing, ai: {...} }
   let ob = null;      // Onboarding: { step, values }
 
@@ -145,7 +146,7 @@
     const item = { name: entry.name, amount: entry.amount, kcal: entry.kcal, p: entry.p, f: entry.f, kh: entry.kh };
     data.recents = data.recents.filter(r => itemKey(r) !== itemKey(item));
     data.recents.unshift(item);
-    data.recents = data.recents.slice(0, 20);
+    data.recents = data.recents.slice(0, 50);
   }
 
   function addEntry(dayKey, mealId, values) {
@@ -264,7 +265,7 @@
       <div class="today-grid">
       <div class="today-col">
       <div class="card ring-card">
-        ${Charts.ring(totals.kcal, m.goal)}
+        ${Charts.ring(totals.kcal, m.goal, m.tdee)}
         <div class="stat-row">
           <div class="stat"><div class="stat-value">${fmtKcal(m.tdee)}</div><div class="stat-label">Verbrauch</div></div>
           <div class="stat"><div class="stat-value">${fmtKcal(totals.kcal)}</div><div class="stat-label">Gegessen</div></div>
@@ -342,17 +343,29 @@
     const cutoff = rangeDays === Infinity ? '' : addDays(todayKey(), -rangeDays);
     const visible = trend.filter(t => t.key >= cutoff);
 
-    const todaysWeight = data.weights[todayKey()];
+    const marks = Calc.milestones(trend, start, p.targetWeightKg);
+    const next = Calc.nextMilestone(latestTrend, p.targetWeightKg);
+
+    const dateWeight = data.weights[weightDate];
+    const dateLabel = weightDate === todayKey() ? 'Heute'
+      : weightDate === addDays(todayKey(), -1) ? 'Gestern'
+      : fmtDateShort(weightDate);
 
     let html = `
       <h1 class="view-title">Gewicht</h1>
 
       <div class="card">
-        <label class="field-label" for="weight-input">Gewicht heute (kg)</label>
+        <label class="field-label" for="weight-input">Gewicht (kg)</label>
         <div class="inline-form">
           <input id="weight-input" type="text" inputmode="decimal" placeholder="z. B. 82,4"
-            value="${todaysWeight != null ? esc(NF1.format(todaysWeight)) : ''}">
+            value="${dateWeight != null ? esc(NF1.format(dateWeight)) : ''}">
           <button class="btn primary" data-action="save-weight">Speichern</button>
+        </div>
+        <div class="weight-date">für
+          <label class="date-tap">${esc(dateLabel)}
+            <input type="date" id="weight-date" value="${weightDate}"
+              max="${todayKey()}" min="${addDays(todayKey(), -365)}">
+          </label>
         </div>
       </div>
 
@@ -362,7 +375,7 @@
             `<button class="${weightRange === r ? 'active' : ''}" data-action="weight-range" data-range="${r}">${{ '1m': '1 M', '3m': '3 M', '1y': '1 J', 'all': 'Alles' }[r]}</button>`
           ).join('')}
         </div>
-        ${Charts.weightChart(visible, p.targetWeightKg)}
+        ${Charts.weightChart(visible, p.targetWeightKg, marks)}
         <div class="legend">
           <span><i class="dot-accent"></i> 7-Tage-Trend</span>
           <span><i class="dot-raw"></i> Messwerte</span>
@@ -384,6 +397,10 @@
           <div class="tile-label">Bis Ziel</div>
         </div>
         <div class="card tile">
+          <div class="tile-value">${next ? (next.reached ? 'Ziel erreicht 🎉' : `&lt; ${fmtKg(next.threshold)} kg`) : '–'}</div>
+          <div class="tile-label">${next && !next.reached ? `Nächstes Ziel – noch ${fmtKg(next.remaining)} kg` : 'Nächstes Ziel'}</div>
+        </div>
+        <div class="card tile wide">
           <div class="tile-value">${fc ? esc(fc.date.toLocaleDateString('de-DE', { day: 'numeric', month: 'short', year: 'numeric' })) : '–'}</div>
           <div class="tile-label">${fc ? 'Ziel voraussichtlich erreicht' : 'Prognose: noch nicht genug Daten'}</div>
         </div>
@@ -391,6 +408,14 @@
       ${!fc ? `<p class="hint">Für eine Prognose braucht es mindestens 5 getrackte Tage mit einem durchschnittlichen Kaloriendefizit und einen Trend oberhalb des Zielgewichts.</p>` : ''}`;
 
     $('#view-weight').innerHTML = html;
+
+    $('#weight-date').addEventListener('change', () => {
+      const v = $('#weight-date').value;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(v) && v <= todayKey()) {
+        weightDate = v;
+        renderWeight();
+      }
+    });
   }
 
   function signedKg(diff) {
@@ -556,7 +581,7 @@
         <button class="btn danger" data-action="delete-all">Alle Daten löschen</button>
       </div>
 
-      <p class="hint center">Kalorientracker · Version 1.1 · Daten bleiben auf dem Gerät</p>`;
+      <p class="hint center">Kalorientracker · Version 1.2 · Daten bleiben auf dem Gerät</p>`;
 
     $('#view-settings').innerHTML = html;
 
@@ -835,20 +860,49 @@
     return FOODS.filter(f => f.name.toLowerCase().includes(q)).slice(0, 30);
   }
 
+  // Eigene Einträge (Favoriten + Letzte, ohne Duplikate), deren Name die Query enthält.
+  function searchOwnItems(query) {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const seen = new Set();
+    const out = [];
+    data.favorites.concat(data.recents).forEach(item => {
+      const key = itemKey(item);
+      if (seen.has(key)) return;
+      seen.add(key);
+      if (item.name.toLowerCase().includes(q)) out.push(item);
+    });
+    return out.slice(0, 20);
+  }
+
   function foodResultsHtml(query) {
+    const own = searchOwnItems(query);
     const results = searchFoods(query);
-    if (results.length === 0) {
+    if (own.length === 0 && results.length === 0) {
       return '<p class="hint">Nichts gefunden. Tipp: Reiter „Schnell“ für freie Eingabe.</p>';
     }
-    return results.map(f => {
-      const idx = FOODS.indexOf(f);
-      const per = f.unit === 'stk' ? 'pro Stück' : `pro 100 ${f.unit === 'ml' ? 'ml' : 'g'}`;
-      return `
+    let html = '';
+    if (own.length) {
+      html += '<div class="list-section">Meine Einträge</div>';
+      html += own.map(item => `
+        <button class="list-row" data-action="add-saved" data-key="${esc(itemKey(item))}">
+          <span class="list-name">${esc(item.name)}</span>
+          <span class="list-info">${esc(item.amount || '')}${item.amount ? ' · ' : ''}${fmtKcal(item.kcal)} kcal</span>
+        </button>`).join('');
+    }
+    if (results.length) {
+      if (own.length) html += '<div class="list-section">Datenbank</div>';
+      html += results.map(f => {
+        const idx = FOODS.indexOf(f);
+        const per = f.unit === 'stk' ? 'pro Stück' : `pro 100 ${f.unit === 'ml' ? 'ml' : 'g'}`;
+        return `
         <button class="list-row" data-action="pick-food" data-idx="${idx}">
           <span class="list-name">${esc(f.name)}</span>
           <span class="list-info">${fmtKcal(f.kcal)} kcal ${per}</span>
         </button>`;
-    }).join('');
+      }).join('');
+    }
+    return html;
   }
 
   function computeFood(food, amount) {
@@ -1422,10 +1476,12 @@
       case 'save-weight': {
         const v = parseGermanFloat($('#weight-input').value);
         if (v === null || v < 30 || v > 300) { toast('Bitte ein Gewicht zwischen 30 und 300 kg angeben.'); break; }
-        data.weights[todayKey()] = Math.round(v * 10) / 10;
+        const savedFor = weightDate;
+        data.weights[savedFor] = Math.round(v * 10) / 10;
+        weightDate = todayKey();
         persist();
         renderAll();
-        toast('Gewicht gespeichert');
+        toast(savedFor === todayKey() ? 'Gewicht gespeichert' : `Gewicht für ${fmtDateShort(savedFor)} gespeichert`);
         break;
       }
       case 'weight-range':

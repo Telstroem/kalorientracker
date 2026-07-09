@@ -73,6 +73,34 @@ const Calc = (() => {
     return { days, date };
   }
 
+  // Meilensteine: volle kg-Schwellen zwischen Start- und Zielgewicht (nur Abnahme).
+  // Erreicht am ersten Tag, an dem der 7-Tage-Trend die Schwelle unterschreitet.
+  // trendEntries: [{ key, weight, trend }] aufsteigend (aus weightTrend()).
+  // Liefert [{ threshold, key, trend }] absteigend nach Schwelle.
+  function milestones(trendEntries, startWeight, targetWeight) {
+    const result = [];
+    if (!Array.isArray(trendEntries) || trendEntries.length === 0) return result;
+    if (!(startWeight > targetWeight)) return result;
+    let threshold = Math.floor(startWeight);
+    if (threshold >= startWeight) threshold -= 1;
+    for (; threshold >= targetWeight; threshold--) {
+      const hit = trendEntries.find(e => e.trend < threshold);
+      if (!hit) break; // tiefere Schwellen können dann auch nicht erreicht sein
+      result.push({ threshold, key: hit.key, trend: hit.trend });
+    }
+    return result;
+  }
+
+  // Nächste volle kg-Schwelle unterhalb des aktuellen Trends (Untergrenze: Zielgewicht).
+  function nextMilestone(currentTrend, targetWeight) {
+    if (currentTrend == null || !isFinite(currentTrend)) return null;
+    if (currentTrend <= targetWeight) return { reached: true };
+    let threshold = Math.floor(currentTrend);
+    if (threshold >= currentTrend) threshold -= 1;
+    if (threshold < targetWeight) threshold = targetWeight;
+    return { reached: false, threshold, remaining: currentTrend - threshold };
+  }
+
   function dateFromKey(key) {
     const [y, m, d] = key.split('-').map(Number);
     return new Date(y, m - 1, d);
@@ -81,6 +109,6 @@ const Calc = (() => {
   return {
     ACTIVITY_FACTORS, ACTIVITY_LABELS, KCAL_PER_KG_FAT,
     ageFromBirthYear, bmr, tdee, calorieGoal, proteinGoal,
-    dayDeficit, weightTrend, forecast
+    dayDeficit, weightTrend, forecast, milestones, nextMilestone
   };
 })();
