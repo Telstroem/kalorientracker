@@ -115,17 +115,59 @@
     return data.profile ? data.profile.startWeightKg : 80;
   }
 
+  // Zentrale Kennzahlen. Bei aktiver Kalibrierung gilt der gedämpfte, einmal
+  // täglich fortgeschriebene effektive TDEE (settings.appliedTdee) einheitlich
+  // für Ziel, Defizit, Ring und Prognose.
   function metricsFor(key) {
     const p = data.profile;
     const weight = weightOnOrBefore(key) ?? currentWeight();
     const age = Calc.ageFromBirthYear(p.birthYear);
     const bmr = Calc.bmr(p.sex, weight, p.heightCm, age);
-    const tdee = Calc.tdee(bmr, p.activity);
+    const formulaTdee = Calc.tdee(bmr, p.activity);
+    const s = data.settings;
+    const tdee = (s.useCalibratedTdee && typeof s.appliedTdee === 'number' && isFinite(s.appliedTdee))
+      ? s.appliedTdee
+      : formulaTdee;
     return {
-      weight, bmr, tdee,
+      weight, bmr, formulaTdee, tdee,
       goal: Calc.calorieGoal(tdee, p.deficit),
       proteinGoal: Calc.proteinGoal(weight, p.proteinPerKg)
     };
+  }
+
+  // ---------- Verbrauchs-Kalibrierung ----------
+
+  function daysBetweenKeys(a, b) {
+    return Math.round((dateFromKey(b) - dateFromKey(a)) / 86400000);
+  }
+
+  function computeCalibration() {
+    const trend = Calc.weightTrend(weightEntries());
+    const intakes = trackedKeys()
+      .filter(k => k <= todayKey())
+      .map(k => ({ key: k, kcal: dayTotals(k).kcal }));
+    return Calc.calibratedTdee(trend, intakes, todayKey());
+  }
+
+  function formulaTdeeToday() {
+    const p = data.profile;
+    const bmr = Calc.bmr(p.sex, currentWeight(), p.heightCm, Calc.ageFromBirthYear(p.birthYear));
+    return Calc.tdee(bmr, p.activity);
+  }
+
+  // Einmal pro Tag: effektiven TDEE neu bestimmen, Drift auf 50 kcal/Tag begrenzt.
+  function refreshAppliedTdee() {
+    const s = data.settings;
+    if (!s.useCalibratedTdee || !data.profile) return;
+    const today = todayKey();
+    if (s.appliedTdeeDate === today) return;
+    const eff = Calc.effectiveTdee(formulaTdeeToday(), computeCalibration());
+    const elapsed = s.appliedTdeeDate ? Math.max(1, daysBetweenKeys(s.appliedTdeeDate, today)) : 1;
+    s.appliedTdee = (typeof s.appliedTdee === 'number')
+      ? Calc.limitDrift(s.appliedTdee, eff.tdee, elapsed)
+      : eff.tdee;
+    s.appliedTdeeDate = today;
+    persist();
   }
 
   function avgDeficit(lastN) {
@@ -346,6 +388,29 @@
     const marks = Calc.milestones(trend, start, p.targetWeightKg);
     const next = Calc.nextMilestone(latestTrend, p.targetWeightKg);
 
+    const cal = computeCalibration();
+    const mToday = metricsFor(todayKey());
+    let calTile = '';
+    if (data.settings.useCalibratedTdee) {
+      calTile = `
+        <div class="card tile wide">
+          <div class="tile-value">${fmtKcal(mToday.tdee)} kcal</div>
+          <div class="tile-label">Verbrauchsbasis: automatisch kalibriert (Formel: ${fmtKcal(mToday.formulaTdee)} kcal)${cal ? ` · ${NF0.format(cal.days)} Tage Beobachtung` : ' · Datenlage aktuell dünn, Wert bleibt stabil'} – umstellbar in den Einstellungen</div>
+        </div>`;
+    } else if (cal) {
+      const higher = cal.tdee > mToday.formulaTdee + 25;
+      const lower = cal.tdee < mToday.formulaTdee - 25;
+      const note = higher
+        ? 'Dein realer Verbrauch liegt über der Formel.'
+        : (lower ? 'Dein realer Verbrauch liegt etwas unter der Formel.' : 'Beobachtung und Formel stimmen gut überein.');
+      calTile = `
+        <div class="card tile wide">
+          <div class="tile-value">Realer Verbrauch ≈ ${fmtKcal(cal.tdee)} kcal</div>
+          <div class="tile-label">${note} Formel: ${fmtKcal(mToday.formulaTdee)} kcal · Basis: ${NF0.format(cal.days)} getrackte Tage. Übernahme wirkt gedämpft und begrenzt aufs Tagesziel.</div>
+          <button class="btn primary cal-btn" data-action="use-calibrated">Als Basis übernehmen</button>
+        </div>`;
+    }
+
     const dateWeight = data.weights[weightDate];
     const dateLabel = weightDate === todayKey() ? 'Heute'
       : weightDate === addDays(todayKey(), -1) ? 'Gestern'
@@ -404,6 +469,7 @@
           <div class="tile-value">${fc ? esc(fc.date.toLocaleDateString('de-DE', { day: 'numeric', month: 'short', year: 'numeric' })) : '–'}</div>
           <div class="tile-label">${fc ? 'Ziel voraussichtlich erreicht' : 'Prognose: noch nicht genug Daten'}</div>
         </div>
+        ${calTile}
       </div>
       ${!fc ? `<p class="hint">Für eine Prognose braucht es mindestens 5 getrackte Tage mit einem durchschnittlichen Kaloriendefizit und einen Trend oberhalb des Zielgewichts.</p>` : ''}`;
 
@@ -466,8 +532,34 @@
           <div class="tile-value ${cumDeficit < 0 ? 'neg' : ''}">${cumDeficit < 0 ? '+' : ''}${fmtKcal(Math.abs(cumDeficit))} kcal</div>
           <div class="tile-label">Kumuliertes ${cumDeficit < 0 ? 'Plus' : 'Defizit'} gesamt · ≈ ${NF1.format(Math.abs(kgFat))} kg Fett</div>
         </div>
-      </div>
+      </div>`;
 
+    const dayStats = allTracked.map(k => {
+      const tot = dayTotals(k);
+      return { key: k, kcal: tot.kcal, protein: tot.p, goal: metricsFor(k).goal };
+    });
+    const weeks = Calc.weeklyStats(dayStats, Calc.weightTrend(weightEntries())).slice(0, 8);
+    if (weeks.length) {
+      html += `
+      <div class="card">
+        <div class="card-title">Wochen</div>
+        ${weeks.map(w => `
+        <div class="week-row">
+          <div class="week-head">
+            <span class="week-label">${esc(w.label)}</span>
+            <span class="week-days">${NF0.format(w.days)} ${w.days === 1 ? 'Tag' : 'Tage'}</span>
+          </div>
+          <div class="week-stats">
+            <span>Ø ${fmtKcal(w.avgKcal)} kcal</span>
+            <span>Ø ${fmtG(w.avgProtein)} g P</span>
+            <span>${NF0.format(Math.round(w.adherence * 100))} % im Ziel</span>
+            <span>${w.weightDelta !== null ? signedKg(w.weightDelta) : '– kg'}</span>
+          </div>
+        </div>`).join('')}
+      </div>`;
+    }
+
+    html += `
       <div class="card">
         <div class="card-title">Getrackte Tage</div>`;
 
@@ -539,10 +631,21 @@
         </div>
         <div class="calc-preview">
           <div><span>Grundumsatz (BMR)</span><strong>${fmtKcal(m.bmr)} kcal</strong></div>
-          <div><span>Gesamtumsatz (TDEE)</span><strong>${fmtKcal(m.tdee)} kcal</strong></div>
+          <div><span>Gesamtumsatz (TDEE)${data.settings.useCalibratedTdee ? ' – kalibriert' : ''}</span><strong>${fmtKcal(m.tdee)} kcal</strong></div>
           <div><span>Kalorienziel</span><strong>${fmtKcal(m.goal)} kcal</strong></div>
           <div><span>Proteinziel</span><strong>${fmtG(m.proteinGoal)} g</strong></div>
         </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Verbrauchsbasis</div>
+        <label class="row-label">Berechnung
+          <select data-setting="tdeeBasis">
+            <option value="formula" ${!data.settings.useCalibratedTdee ? 'selected' : ''}>Formel</option>
+            <option value="calibrated" ${data.settings.useCalibratedTdee ? 'selected' : ''}>Automatisch kalibriert</option>
+          </select>
+        </label>
+        <p class="hint">${tdeeBasisStatus()}</p>
       </div>
 
       <div class="card">
@@ -562,8 +665,10 @@
         <input id="api-key-input" type="password" autocomplete="off" placeholder="sk-ant-…"
           value="${esc(data.settings.apiKey || '')}" data-setting="apiKey">
         <p class="hint">Mit hinterlegtem Key erscheint beim Eintragen der Reiter „KI“: Mahlzeiten
-        per Foto oder Freitext schätzen lassen. Der Key wird nur lokal auf diesem Gerät gespeichert.
-        Jede Anfrage kostet wenige Cent; Fotos und Texte werden dafür an Anthropic übertragen.</p>
+        oder Nährwert-Etiketten per Foto bzw. Freitext auswerten lassen. Der Key wird nur lokal
+        auf diesem Gerät gespeichert. Jede Anfrage kostet wenige Cent; Fotos und Texte werden
+        dafür an Anthropic übertragen. Die Online-Produktsuche sendet ausschließlich den
+        Suchbegriff an Open Food Facts. Sonst verlässt kein Datum das Gerät.</p>
       </div>
 
       <div class="card">
@@ -574,6 +679,11 @@
           <button class="btn primary" data-action="export">Daten exportieren</button>
           <button class="btn" data-action="import">Daten importieren …</button>
         </div>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn" data-action="export-csv">Tage als CSV exportieren</button>
+        </div>
+        <p class="hint">${lastExportLabel()} Die CSV enthält je getracktem Tag kcal, Makros,
+        Verbrauch, Defizit und Gewicht (Semikolon-getrennt, für Excel).</p>
       </div>
 
       <div class="card">
@@ -581,12 +691,85 @@
         <button class="btn danger" data-action="delete-all">Alle Daten löschen</button>
       </div>
 
-      <p class="hint center">Kalorientracker · Version 1.2 · Daten bleiben auf dem Gerät</p>`;
+      <p class="hint center">Kalorientracker · Version 1.3 · Daten bleiben auf dem Gerät</p>`;
 
     $('#view-settings').innerHTML = html;
 
     document.querySelectorAll('#view-settings [data-setting]').forEach(el => {
       el.addEventListener('change', onSettingChange);
+    });
+  }
+
+  function tdeeBasisStatus() {
+    const s = data.settings;
+    const cal = computeCalibration();
+    if (s.useCalibratedTdee) {
+      const m = metricsFor(todayKey());
+      return `Aktiv: effektiver Verbrauch heute ${fmtKcal(m.tdee)} kcal (Formel: ${fmtKcal(m.formulaTdee)} kcal). ` +
+        'Der Wert folgt der Beobachtung gedämpft (max. 50 kcal Änderung pro Tag, ±25 % um die Formel).';
+    }
+    if (cal) {
+      return `Beobachtung verfügbar: realer Verbrauch ≈ ${fmtKcal(cal.tdee)} kcal aus ${NF0.format(cal.days)} getrackten Tagen. ` +
+        'Umschalten übernimmt ihn gedämpft als Basis für Ziel und Defizit.';
+    }
+    return 'Noch zu wenig Daten für eine Kalibrierung (mindestens 14 getrackte Tage und regelmäßige Wiegungen innerhalb von 28 Tagen).';
+  }
+
+  function lastExportLabel() {
+    const ts = data.settings.lastExport ? Date.parse(data.settings.lastExport) : null;
+    if (!ts || !isFinite(ts)) return 'Noch kein Export erstellt.';
+    const days = Math.floor((Date.now() - ts) / 86400000);
+    if (days <= 0) return 'Letzter Export: heute.';
+    if (days === 1) return 'Letzter Export: gestern.';
+    return `Letzter Export: vor ${NF0.format(days)} Tagen.`;
+  }
+
+  function markExported() {
+    data.settings.lastExport = new Date().toISOString();
+    persist();
+  }
+
+  // CSV: Datum;kcal;Protein_g;Fett_g;KH_g;TDEE;Defizit;Gewicht — Semikolon, Komma-Dezimal.
+  function buildCsv() {
+    const de1 = n => String(Math.round(n * 10) / 10).replace('.', ',');
+    const lines = ['Datum;kcal;Protein_g;Fett_g;KH_g;TDEE;Defizit;Gewicht'];
+    trackedKeys().filter(k => k <= todayKey()).forEach(k => {
+      const tot = dayTotals(k);
+      const m = metricsFor(k);
+      const [y, mo, d] = k.split('-');
+      const weight = data.weights[k];
+      lines.push([
+        `${d}.${mo}.${y}`,
+        String(Math.round(tot.kcal)),
+        de1(tot.p),
+        de1(tot.f),
+        de1(tot.kh),
+        String(m.tdee),
+        String(Math.round(m.tdee - tot.kcal)),
+        weight != null ? de1(weight) : ''
+      ].join(';'));
+    });
+    return lines.join('\r\n') + '\r\n';
+  }
+
+  // Backup-Erinnerung: >14 Tage kein Export bei >=7 getrackten Tagen, max. 1× pro Tag.
+  function maybeBackupHint() {
+    const s = data.settings;
+    if (trackedKeys().length < 7) return;
+    if (s.lastBackupHint === todayKey()) return;
+    const ts = s.lastExport ? Date.parse(s.lastExport) : null;
+    const days = ts && isFinite(ts) ? Math.floor((Date.now() - ts) / 86400000) : null;
+    if (days !== null && days <= 14) return;
+    s.lastBackupHint = todayKey();
+    persist();
+    toast(days !== null ? `Letztes Backup vor ${NF0.format(days)} Tagen – jetzt exportieren?` : 'Noch kein Backup erstellt – jetzt exportieren?', {
+      actionLabel: 'Exportieren',
+      duration: 6000,
+      onAction: () => {
+        activeTab = 'settings';
+        updateTabbar();
+        window.scrollTo(0, 0);
+      }
     });
   }
 
@@ -632,6 +815,21 @@
       }
       case 'theme': data.settings.theme = el.value; break;
       case 'apiKey': data.settings.apiKey = el.value.trim(); break;
+      case 'tdeeBasis': {
+        const s = data.settings;
+        if (el.value === 'calibrated') {
+          s.useCalibratedTdee = true;
+          s.appliedTdee = Calc.effectiveTdee(formulaTdeeToday(), computeCalibration()).tdee;
+          s.appliedTdeeDate = todayKey();
+          toast('Verbrauchsbasis: automatisch kalibriert');
+        } else {
+          s.useCalibratedTdee = false;
+          s.appliedTdee = null;
+          s.appliedTdeeDate = null;
+          toast('Verbrauchsbasis: Formel');
+        }
+        break;
+      }
     }
     persist();
     renderAll();
@@ -799,7 +997,12 @@
   // ---------- Eintrags-Sheet ----------
 
   function openSheet(mealId) {
-    sheet = { meal: mealId, tab: 'search', query: '', food: null, amount: null, editing: null, ai: { text: '', image: null, items: null, busy: false, error: '' } };
+    sheet = {
+      meal: mealId, tab: 'search', query: '', food: null, amount: null, editing: null,
+      favMode: null, dishMeal: null,
+      off: { status: 'idle', results: null, error: '' },
+      ai: { text: '', image: null, items: null, busy: false, error: '', mode: 'meal' }
+    };
     renderSheet();
     showSheet(true);
   }
@@ -875,34 +1078,112 @@
     return out.slice(0, 20);
   }
 
+  function dishKcal(dish) {
+    return dish.items.reduce((a, it) => a + (it.kcal || 0), 0);
+  }
+
+  function searchDishes(query) {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    return data.dishes
+      .map((dish, idx) => ({ dish, idx }))
+      .filter(x => x.dish.name.toLowerCase().includes(q))
+      .slice(0, 10);
+  }
+
   function foodResultsHtml(query) {
     const own = searchOwnItems(query);
+    const dishes = searchDishes(query);
     const results = searchFoods(query);
-    if (own.length === 0 && results.length === 0) {
-      return '<p class="hint">Nichts gefunden. Tipp: Reiter „Schnell“ für freie Eingabe.</p>';
-    }
+    const q = query.trim();
     let html = '';
-    if (own.length) {
-      html += '<div class="list-section">Meine Einträge</div>';
-      html += own.map(item => `
+
+    if (own.length === 0 && dishes.length === 0 && results.length === 0) {
+      html += '<p class="hint">Nichts gefunden. Tipp: Reiter „Schnell“ für freie Eingabe.</p>';
+    } else {
+      if (own.length || dishes.length) {
+        html += '<div class="list-section">Meine Einträge</div>';
+        html += dishes.map(x => `
+        <button class="list-row" data-action="add-dish" data-idx="${x.idx}">
+          <span class="list-name">Gericht · ${esc(x.dish.name)}</span>
+          <span class="list-info">${NF0.format(x.dish.items.length)} Komponenten · ${fmtKcal(dishKcal(x.dish))} kcal</span>
+        </button>`).join('');
+        html += own.map(item => `
         <button class="list-row" data-action="add-saved" data-key="${esc(itemKey(item))}">
           <span class="list-name">${esc(item.name)}</span>
           <span class="list-info">${esc(item.amount || '')}${item.amount ? ' · ' : ''}${fmtKcal(item.kcal)} kcal</span>
         </button>`).join('');
-    }
-    if (results.length) {
-      if (own.length) html += '<div class="list-section">Datenbank</div>';
-      html += results.map(f => {
-        const idx = FOODS.indexOf(f);
-        const per = f.unit === 'stk' ? 'pro Stück' : `pro 100 ${f.unit === 'ml' ? 'ml' : 'g'}`;
-        return `
+      }
+      if (results.length) {
+        if (own.length || dishes.length) html += '<div class="list-section">Datenbank</div>';
+        html += results.map(f => {
+          const idx = FOODS.indexOf(f);
+          const per = f.unit === 'stk' ? 'pro Stück' : `pro 100 ${f.unit === 'ml' ? 'ml' : 'g'}`;
+          return `
         <button class="list-row" data-action="pick-food" data-idx="${idx}">
           <span class="list-name">${esc(f.name)}</span>
           <span class="list-info">${fmtKcal(f.kcal)} kcal ${per}</span>
         </button>`;
-      }).join('');
+        }).join('');
+      }
+    }
+
+    // Online-Suche (Open Food Facts)
+    if (q.length >= 3) {
+      const off = sheet.off;
+      if (off.status === 'loading') {
+        html += '<p class="hint off-status">Suche online …</p>';
+      } else if (off.status === 'error') {
+        html += `<p class="error-msg">${esc(off.error)}</p>
+          <button class="btn full" data-action="off-search">Erneut online suchen</button>`;
+      } else if (off.status === 'done') {
+        html += '<div class="list-section">Open Food Facts</div>';
+        if (off.results.length === 0) {
+          html += '<p class="hint">Keine Online-Treffer für diesen Begriff.</p>';
+        } else {
+          html += off.results.map((prod, idx) => `
+        <button class="list-row" data-action="pick-off" data-idx="${idx}">
+          <span class="list-name">${esc(prod.name)}${prod.brand ? ` · ${esc(prod.brand)}` : ''}</span>
+          <span class="list-info">${fmtKcal(prod.kcal)} kcal pro 100 g</span>
+        </button>`).join('');
+        }
+      } else {
+        html += `<button class="btn full ${results.length === 0 ? 'primary' : ''}" data-action="off-search">Online suchen (Open Food Facts)</button>`;
+      }
     }
     return html;
+  }
+
+  function offToFood(prod) {
+    const servingQty = parseQtyFromText(prod.serving);
+    const validServing = servingQty !== null && servingQty > 0 && servingQty <= 2000;
+    return {
+      name: prod.brand ? `${prod.name} (${prod.brand})` : prod.name,
+      unit: /\bml\b/i.test(prod.serving || '') ? 'ml' : 'g',
+      kcal: prod.kcal, p: prod.p, f: prod.f, kh: prod.kh,
+      portion: validServing ? servingQty : undefined,
+      portionName: prod.serving ? `1 Portion (${prod.serving})` : ''
+    };
+  }
+
+  async function runOffSearch() {
+    const q = sheet.query.trim();
+    if (q.length < 3) return;
+    sheet.off = { status: 'loading', results: null, error: '' };
+    const box = $('#food-results');
+    if (box) box.innerHTML = foodResultsHtml(sheet.query);
+    let next;
+    try {
+      const results = await OFF.search(q);
+      next = { status: 'done', results, error: '' };
+    } catch (err) {
+      next = { status: 'error', results: null, error: err.message };
+    }
+    if (!sheet || sheet.tab !== 'search') return;
+    if (sheet.query.trim() !== q) return; // Query wurde inzwischen geändert
+    sheet.off = next;
+    const box2 = $('#food-results');
+    if (box2) box2.innerHTML = foodResultsHtml(sheet.query);
   }
 
   function computeFood(food, amount) {
@@ -974,7 +1255,7 @@
       </div>`;
     }).join('');
 
-    let html = '';
+    let html = dishesSectionHtml();
     if (data.favorites.length) {
       html += `<div class="list-section">Favoriten</div><div class="list">${favHtml(data.favorites)}</div>`;
     }
@@ -982,9 +1263,57 @@
     if (recentOnly.length) {
       html += `<div class="list-section">Zuletzt verwendet</div><div class="list">${favHtml(recentOnly)}</div>`;
     }
-    if (!html) {
-      html = '<p class="hint">Noch nichts vorhanden. Einträge erscheinen hier automatisch – mit ☆ markierst du Favoriten.</p>';
+    if (!data.favorites.length && !recentOnly.length && !data.dishes.length && !sheet.favMode) {
+      html += '<p class="hint">Noch nichts vorhanden. Einträge erscheinen hier automatisch – mit ☆ markierst du Favoriten.</p>';
     }
+    return html;
+  }
+
+  // --- Meine Gerichte ---
+
+  function dishesSectionHtml() {
+    let html = '<div class="list-section">Meine Gerichte</div>';
+
+    if (sheet.favMode === 'pick') {
+      html += `<p class="hint dish-hint">Welche Mahlzeit von ${esc(fmtDayLabel(currentDay))} soll als Vorlage dienen?</p>
+        <div class="choice-list">`;
+      MEALS.forEach(meal => {
+        const entries = getDay(currentDay).meals[meal.id] || [];
+        const sum = entries.reduce((a, e) => a + e.kcal, 0);
+        html += `
+          <button class="choice" data-action="dish-pick" data-meal="${meal.id}" ${entries.length === 0 ? 'disabled' : ''}>
+            <strong>${meal.label}</strong>
+            <span>${entries.length === 0 ? 'keine Einträge' : `${NF0.format(entries.length)} ${entries.length === 1 ? 'Eintrag' : 'Einträge'} · ${fmtKcal(sum)} kcal`}</span>
+          </button>`;
+      });
+      html += `</div><button class="btn full" data-action="dish-cancel">Abbrechen</button>`;
+      return html;
+    }
+
+    if (sheet.favMode === 'name') {
+      const entries = getDay(currentDay).meals[sheet.dishMeal] || [];
+      const sum = entries.reduce((a, e) => a + e.kcal, 0);
+      html += `
+        <p class="hint dish-hint">${NF0.format(entries.length)} Komponenten aus „${esc(mealLabel(sheet.dishMeal))}“ · ${fmtKcal(sum)} kcal</p>
+        <input type="text" id="dish-name" placeholder="Name des Gerichts, z. B. Mein Frühstück" autocomplete="off">
+        <div class="btn-row dish-btns">
+          <button class="btn" data-action="dish-cancel">Abbrechen</button>
+          <button class="btn primary" data-action="dish-save">Speichern</button>
+        </div>`;
+      return html;
+    }
+
+    if (data.dishes.length) {
+      html += `<div class="list">${data.dishes.map((dish, idx) => `
+        <div class="list-row split">
+          <button class="list-tap" data-action="add-dish" data-idx="${idx}">
+            <span class="list-name">${esc(dish.name)}</span>
+            <span class="list-info">${NF0.format(dish.items.length)} Komponenten · ${fmtKcal(dishKcal(dish))} kcal</span>
+          </button>
+          <button class="entry-del" data-action="del-dish" data-idx="${idx}" aria-label="Gericht löschen">×</button>
+        </div>`).join('')}</div>`;
+    }
+    html += `<button class="btn dish-create-btn" data-action="dish-create">Gericht aus Tag erstellen</button>`;
     return html;
   }
 
@@ -1020,10 +1349,18 @@
 
   function sheetAiBody() {
     const ai = sheet.ai;
+    const isLabel = ai.mode === 'label';
     let html = `
-      <p class="hint">Mahlzeit fotografieren oder beschreiben – Claude schätzt die Nährwerte.
-      Vorschläge lassen sich vor dem Speichern anpassen.</p>
-      <textarea id="ai-text" rows="2" placeholder="z. B. 2 Brötchen mit Käse und ein Cappuccino">${esc(ai.text || '')}</textarea>
+      <div class="segmented ai-mode-seg">
+        <button class="${!isLabel ? 'active' : ''}" data-action="ai-mode" data-mode="meal">Mahlzeit</button>
+        <button class="${isLabel ? 'active' : ''}" data-action="ai-mode" data-mode="label">Etikett</button>
+      </div>
+      <p class="hint">${isLabel
+        ? 'Nährwerttabelle der Packung fotografieren – die Werte werden exakt abgelesen (pro 100 g und, falls angegeben, pro Portion).'
+        : 'Mahlzeit fotografieren oder beschreiben – Claude schätzt die Nährwerte. Vorschläge lassen sich vor dem Speichern anpassen.'}</p>
+      <textarea id="ai-text" rows="2" placeholder="${isLabel
+        ? 'optional: Produktname'
+        : 'z. B. 2 Brötchen mit Käse und ein Cappuccino'}">${esc(ai.text || '')}</textarea>
       <div class="btn-row">
         <label class="btn file-btn">
           ${ai.image ? 'Anderes Foto' : 'Foto aufnehmen/wählen'}
@@ -1178,6 +1515,7 @@
     if (search) {
       search.addEventListener('input', () => {
         sheet.query = search.value;
+        sheet.off = { status: 'idle', results: null, error: '' };
         $('#food-results').innerHTML = foodResultsHtml(sheet.query);
       });
       if (document.activeElement !== search && !sheet.query) {
@@ -1240,6 +1578,11 @@
   async function runAiAnalyze() {
     const ai = sheet.ai;
     if (ai.busy) return;
+    if (ai.mode === 'label' && !ai.image) {
+      ai.error = 'Bitte ein Foto der Nährwerttabelle wählen.';
+      renderSheet();
+      return;
+    }
     if (!ai.text.trim() && !ai.image) {
       ai.error = 'Bitte ein Foto wählen oder die Mahlzeit beschreiben.';
       renderSheet();
@@ -1250,7 +1593,7 @@
     ai.items = null;
     renderSheet();
     try {
-      const items = await AI.analyze({ apiKey: data.settings.apiKey, text: ai.text, image: ai.image });
+      const items = await AI.analyze({ apiKey: data.settings.apiKey, text: ai.text, image: ai.image, mode: ai.mode });
       if (!sheet || !sheet.ai) return;
       items.forEach(it => { it.selected = true; });
       sheet.ai.items = items;
@@ -1331,6 +1674,7 @@
         sheet.tab = target.dataset.tab;
         sheet.food = null;
         sheet.amount = null;
+        sheet.favMode = null;
         renderSheet();
         break;
       case 'pick-food':
@@ -1338,6 +1682,18 @@
         sheet.amount = null;
         renderSheet();
         break;
+      case 'off-search':
+        runOffSearch();
+        break;
+      case 'pick-off': {
+        const prod = sheet.off.results && sheet.off.results[parseInt(target.dataset.idx, 10)];
+        if (prod) {
+          sheet.food = offToFood(prod);
+          sheet.amount = null;
+          renderSheet();
+        }
+        break;
+      }
       case 'unpick-food':
         sheet.food = null;
         sheet.amount = null;
@@ -1376,6 +1732,74 @@
         }
         break;
       }
+      case 'dish-create':
+        sheet.favMode = 'pick';
+        renderSheet();
+        break;
+      case 'dish-pick': {
+        const entries = getDay(currentDay).meals[target.dataset.meal] || [];
+        if (entries.length === 0) break;
+        sheet.dishMeal = target.dataset.meal;
+        sheet.favMode = 'name';
+        renderSheet();
+        const nameInput = $('#dish-name');
+        if (nameInput) setTimeout(() => nameInput.focus(), 50);
+        break;
+      }
+      case 'dish-cancel':
+        sheet.favMode = null;
+        sheet.dishMeal = null;
+        renderSheet();
+        break;
+      case 'dish-save': {
+        const name = $('#dish-name').value.trim();
+        if (!name) { toast('Bitte einen Namen für das Gericht angeben.'); break; }
+        const entries = getDay(currentDay).meals[sheet.dishMeal] || [];
+        if (entries.length === 0) { toast('Die gewählte Mahlzeit hat keine Einträge.'); break; }
+        data.dishes.unshift({
+          name: name.slice(0, 60),
+          items: entries.map(e => ({ name: e.name, amount: e.amount || '', kcal: e.kcal, p: e.p || 0, f: e.f || 0, kh: e.kh || 0 }))
+        });
+        persist();
+        sheet.favMode = null;
+        sheet.dishMeal = null;
+        renderSheet();
+        toast('Gericht gespeichert');
+        break;
+      }
+      case 'add-dish': {
+        const dish = data.dishes[parseInt(target.dataset.idx, 10)];
+        if (!dish) break;
+        dish.items.forEach(it => addEntry(currentDay, sheet.meal, it));
+        showSheet(false);
+        renderAll();
+        toast(`„${dish.name}“ gebucht (${NF0.format(dish.items.length)} ${dish.items.length === 1 ? 'Eintrag' : 'Einträge'})`);
+        break;
+      }
+      case 'del-dish': {
+        const idx = parseInt(target.dataset.idx, 10);
+        const removed = data.dishes[idx];
+        if (!removed) break;
+        data.dishes.splice(idx, 1);
+        persist();
+        renderSheet();
+        toast('Gericht gelöscht', {
+          actionLabel: 'Rückgängig',
+          duration: 5000,
+          onAction: () => {
+            data.dishes.splice(Math.min(idx, data.dishes.length), 0, removed);
+            persist();
+            if (sheet && sheet.tab === 'fav') renderSheet();
+          }
+        });
+        break;
+      }
+      case 'ai-mode':
+        sheet.ai.mode = target.dataset.mode === 'label' ? 'label' : 'meal';
+        sheet.ai.items = null;
+        sheet.ai.error = '';
+        renderSheet();
+        break;
       case 'add-quick': {
         const name = $('#quick-name').value.trim();
         const kcal = parseFloat($('#quick-kcal').value) || 0;
@@ -1491,9 +1915,27 @@
 
       // Einstellungen
       case 'export':
+        markExported();
         Storage.exportJson(data);
+        renderSettings();
         toast('Export gestartet');
         break;
+      case 'export-csv':
+        markExported();
+        Storage.exportCsv(buildCsv());
+        renderSettings();
+        toast('CSV-Export gestartet');
+        break;
+      case 'use-calibrated': {
+        const s = data.settings;
+        s.useCalibratedTdee = true;
+        s.appliedTdee = Calc.effectiveTdee(formulaTdeeToday(), computeCalibration()).tdee;
+        s.appliedTdeeDate = todayKey();
+        persist();
+        renderAll();
+        toast('Kalibrierter Verbrauch übernommen');
+        break;
+      }
       case 'import':
         $('#import-file').click();
         break;
@@ -1568,5 +2010,7 @@
 
   // ---------- Start ----------
 
+  if (data.profile) refreshAppliedTdee();
   renderAll();
+  if (data.profile) maybeBackupHint();
 })();

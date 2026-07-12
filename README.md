@@ -12,14 +12,26 @@ Safari öffnen → Teilen → „Zum Home-Bildschirm", dann startet die App im V
   Mahlzeiten mit Einträgen aus Datenbank (~130 deutsche Lebensmittel), Favoriten,
   Schnelleingabe — auch für vergangene Tage.
 - **KI-Erkennung (optional):** Mahlzeit fotografieren oder als Freitext beschreiben,
-  Claude schätzt die Nährwerte. Wird erst aktiv, wenn ein Anthropic-API-Key
-  hinterlegt ist.
-- **Gewicht:** Schnelleingabe, Diagramm mit 7-Tage-Trend und Ziellinie,
-  Prognose fürs Zielgewicht.
+  Claude schätzt die Nährwerte; zweiter Modus **„Etikett“** liest die
+  Nährwerttabelle einer Packung exakt ab (pro 100 g und pro Portion). Wird erst
+  aktiv, wenn ein Anthropic-API-Key hinterlegt ist.
+- **Meine Gerichte:** Einträge einer Mahlzeit als benanntes Gericht speichern
+  und später mit einem Tap komplett buchen (Favoriten-Reiter).
+- **Online-Produktsuche:** Findet die lokale Datenbank nichts, sucht ein Klick
+  bei Open Food Facts (übertragen wird nur der Suchbegriff).
+- **Gewicht:** Schnelleingabe (auch nachtragen), Diagramm mit 7-Tage-Trend,
+  Ziellinie und Meilensteinen, Prognose fürs Zielgewicht; optionale
+  **Verbrauchs-Kalibrierung** aus dem eigenen Ess- und Wiegeprotokoll
+  (gedämpft und begrenzt, in den Einstellungen umschaltbar).
 - **Verlauf:** Kalorien der letzten 14 Tage, Ø-Werte, kumuliertes Defizit
-  (umgerechnet in kg Fett).
+  (umgerechnet in kg Fett), Wochenübersicht (Ø kcal, Ø Protein,
+  Zieleinhaltung, Gewichtsveränderung).
 - **Einstellungen:** Körperdaten und Ziele (BMR/TDEE nach Mifflin-St-Jeor),
-  Farbschema, Export/Import als JSON.
+  Farbschema, Export/Import als JSON, **CSV-Export** der Tageswerte für Excel
+  (Semikolon-getrennt, deutsches Zahlenformat). Hinweis: Bei aktiver
+  Verbrauchs-Kalibrierung enthalten die Spalten TDEE/Defizit für alle Tage
+  den aktuell kalibrierten Verbrauch (eine rückwirkende Tages-Historie der
+  Kalibrierung gibt es bewusst nicht).
 
 Kein Build-Step, keine Frameworks — reines HTML/CSS/JavaScript.
 

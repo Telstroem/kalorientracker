@@ -13,7 +13,8 @@ const Storage = (() => {
       days: {},      // 'YYYY-MM-DD' → { meals: { breakfast:[], lunch:[], dinner:[], snacks:[] } }
       weights: {},   // 'YYYY-MM-DD' → kg (Zahl, 1 Dezimalstelle)
       favorites: [], // { name, amount, kcal, p, f, kh }
-      recents: []    // dito, max. 20
+      recents: [],   // dito, max. 50
+      dishes: []     // { name, items: [{ name, amount, kcal, p, f, kh }] }
     };
   }
 
@@ -30,6 +31,9 @@ const Storage = (() => {
     });
     merged.favorites = Array.isArray(data.favorites) ? data.favorites : [];
     merged.recents = Array.isArray(data.recents) ? data.recents : [];
+    merged.dishes = Array.isArray(data.dishes)
+      ? data.dishes.filter(d => d && typeof d.name === 'string' && Array.isArray(d.items))
+      : [];
     merged.version = CURRENT_VERSION;
     return merged;
   }
@@ -59,19 +63,30 @@ const Storage = (() => {
     localStorage.removeItem(KEY);
   }
 
-  function exportJson(data) {
+  function dateStamp() {
     const now = new Date();
     const pad = n => String(n).padStart(2, '0');
-    const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  }
+
+  function download(filename, content, mime) {
+    const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `kalorientracker-export-${stamp}.json`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function exportJson(data) {
+    download(`kalorientracker-export-${dateStamp()}.json`, JSON.stringify(data, null, 2), 'application/json');
+  }
+
+  function exportCsv(csvText) {
+    download(`kalorientracker-tage-${dateStamp()}.csv`, csvText, 'text/csv;charset=utf-8');
   }
 
   // Wirft Error mit deutscher Meldung bei ungültigen Daten.
@@ -92,5 +107,5 @@ const Storage = (() => {
     return migrate(parsed);
   }
 
-  return { load, save, clearAll, exportJson, parseImport, defaults };
+  return { load, save, clearAll, exportJson, exportCsv, parseImport, defaults };
 })();

@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_VERSION = 'kt-v5';
+const CACHE_VERSION = 'kt-v6';
 
 const ASSETS = [
   './',
@@ -11,6 +11,7 @@ const ASSETS = [
   './js/storage.js',
   './js/charts.js',
   './js/ai.js',
+  './js/off.js',
   './js/app.js',
   './manifest.webmanifest',
   './icons/icon.svg',
