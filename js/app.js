@@ -664,11 +664,15 @@
         <label class="field-label" for="api-key-input">Anthropic-API-Key</label>
         <input id="api-key-input" type="password" autocomplete="off" placeholder="sk-ant-…"
           value="${esc(data.settings.apiKey || '')}" data-setting="apiKey">
+        <label class="row-label" style="margin-top:10px">Online-Recherche bei Markenprodukten
+          <input type="checkbox" data-setting="aiWebSearch" ${data.settings.aiWebSearch !== false ? 'checked' : ''}>
+        </label>
         <p class="hint">Mit hinterlegtem Key erscheint beim Eintragen der Reiter „KI“: Mahlzeiten
         oder Nährwert-Etiketten per Foto bzw. Freitext auswerten lassen. Der Key wird nur lokal
         auf diesem Gerät gespeichert. Jede Anfrage kostet wenige Cent; Fotos und Texte werden
-        dafür an Anthropic übertragen. Die Online-Produktsuche sendet ausschließlich den
-        Suchbegriff an Open Food Facts. Sonst verlässt kein Datum das Gerät.</p>
+        dafür an Anthropic übertragen. Bei aktivierter Online-Recherche darf Claude zusätzlich
+        Nährwerte von Markenprodukten bei fddb nachschlagen (kostet etwas mehr als eine reine
+        Analyse). Sonst verlässt kein Datum das Gerät.</p>
       </div>
 
       <div class="card">
@@ -691,7 +695,7 @@
         <button class="btn danger" data-action="delete-all">Alle Daten löschen</button>
       </div>
 
-      <p class="hint center">Kalorientracker · Version 1.3 · Daten bleiben auf dem Gerät</p>`;
+      <p class="hint center">Kalorientracker · Version 1.4 · Daten bleiben auf dem Gerät</p>`;
 
     $('#view-settings').innerHTML = html;
 
@@ -815,6 +819,7 @@
       }
       case 'theme': data.settings.theme = el.value; break;
       case 'apiKey': data.settings.apiKey = el.value.trim(); break;
+      case 'aiWebSearch': data.settings.aiWebSearch = el.checked; break;
       case 'tdeeBasis': {
         const s = data.settings;
         if (el.value === 'calibrated') {
@@ -1000,8 +1005,7 @@
     sheet = {
       meal: mealId, tab: 'search', query: '', food: null, amount: null, editing: null,
       favMode: null, dishMeal: null,
-      off: { status: 'idle', results: null, error: '' },
-      ai: { text: '', image: null, items: null, busy: false, error: '', mode: 'meal' }
+      ai: { text: '', image: null, items: null, busy: false, error: '', mode: 'meal', webSearchUsed: false }
     };
     renderSheet();
     showSheet(true);
@@ -1013,10 +1017,47 @@
     showSheet(true);
   }
 
+  // Hält das Sheet über der iOS-Bildschirmtastatur: das CSS verankert es am
+  // Layout-Viewport (bottom:0), den die Tastatur nicht verkleinert – der
+  // visualViewport liefert die tatsächlich sichtbare Höhe.
+  let sheetViewportCleanup = null;
+
+  function attachSheetViewport() {
+    const vv = window.visualViewport;
+    if (!vv || sheetViewportCleanup) return;
+    const el = $('#sheet');
+    const update = () => {
+      if (!vv.height) {
+        // Unplausibler Messwert → beim CSS-Fallback (bottom:0, max-height:88vh) bleiben
+        el.style.bottom = '';
+        el.style.maxHeight = '';
+        return;
+      }
+      const offset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      el.style.bottom = offset + 'px';
+      el.style.maxHeight = Math.round(vv.height * 0.88) + 'px';
+    };
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    update();
+    sheetViewportCleanup = () => {
+      vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', update);
+      el.style.bottom = '';
+      el.style.maxHeight = '';
+      sheetViewportCleanup = null;
+    };
+  }
+
   function showSheet(visible) {
     $('#sheet').classList.toggle('hidden', !visible);
     $('#sheet-backdrop').classList.toggle('hidden', !visible);
-    if (!visible) sheet = null;
+    if (visible) {
+      attachSheetViewport();
+    } else {
+      if (sheetViewportCleanup) sheetViewportCleanup();
+      sheet = null;
+    }
   }
 
   function mealLabel(id) {
@@ -1095,7 +1136,6 @@
     const own = searchOwnItems(query);
     const dishes = searchDishes(query);
     const results = searchFoods(query);
-    const q = query.trim();
     let html = '';
 
     if (own.length === 0 && dishes.length === 0 && results.length === 0) {
@@ -1127,63 +1167,7 @@
         }).join('');
       }
     }
-
-    // Online-Suche (Open Food Facts)
-    if (q.length >= 3) {
-      const off = sheet.off;
-      if (off.status === 'loading') {
-        html += '<p class="hint off-status">Suche online …</p>';
-      } else if (off.status === 'error') {
-        html += `<p class="error-msg">${esc(off.error)}</p>
-          <button class="btn full" data-action="off-search">Erneut online suchen</button>`;
-      } else if (off.status === 'done') {
-        html += '<div class="list-section">Open Food Facts</div>';
-        if (off.results.length === 0) {
-          html += '<p class="hint">Keine Online-Treffer für diesen Begriff.</p>';
-        } else {
-          html += off.results.map((prod, idx) => `
-        <button class="list-row" data-action="pick-off" data-idx="${idx}">
-          <span class="list-name">${esc(prod.name)}${prod.brand ? ` · ${esc(prod.brand)}` : ''}</span>
-          <span class="list-info">${fmtKcal(prod.kcal)} kcal pro 100 g</span>
-        </button>`).join('');
-        }
-      } else {
-        html += `<button class="btn full ${results.length === 0 ? 'primary' : ''}" data-action="off-search">Online suchen (Open Food Facts)</button>`;
-      }
-    }
     return html;
-  }
-
-  function offToFood(prod) {
-    const servingQty = parseQtyFromText(prod.serving);
-    const validServing = servingQty !== null && servingQty > 0 && servingQty <= 2000;
-    return {
-      name: prod.brand ? `${prod.name} (${prod.brand})` : prod.name,
-      unit: /\bml\b/i.test(prod.serving || '') ? 'ml' : 'g',
-      kcal: prod.kcal, p: prod.p, f: prod.f, kh: prod.kh,
-      portion: validServing ? servingQty : undefined,
-      portionName: prod.serving ? `1 Portion (${prod.serving})` : ''
-    };
-  }
-
-  async function runOffSearch() {
-    const q = sheet.query.trim();
-    if (q.length < 3) return;
-    sheet.off = { status: 'loading', results: null, error: '' };
-    const box = $('#food-results');
-    if (box) box.innerHTML = foodResultsHtml(sheet.query);
-    let next;
-    try {
-      const results = await OFF.search(q);
-      next = { status: 'done', results, error: '' };
-    } catch (err) {
-      next = { status: 'error', results: null, error: err.message };
-    }
-    if (!sheet || sheet.tab !== 'search') return;
-    if (sheet.query.trim() !== q) return; // Query wurde inzwischen geändert
-    sheet.off = next;
-    const box2 = $('#food-results');
-    if (box2) box2.innerHTML = foodResultsHtml(sheet.query);
   }
 
   function computeFood(food, amount) {
@@ -1379,6 +1363,9 @@
       html += `<p class="error-msg">${esc(ai.error)}</p>`;
     }
     if (ai.items) {
+      if (ai.webSearchUsed) {
+        html += '<p class="hint">Online recherchiert (fddb)</p>';
+      }
       html += '<div class="list-section">Vorschläge – prüfen und anpassen</div><div class="ai-items">';
       ai.items.forEach((it, i) => {
         const sel = it.selected !== false;
@@ -1515,7 +1502,6 @@
     if (search) {
       search.addEventListener('input', () => {
         sheet.query = search.value;
-        sheet.off = { status: 'idle', results: null, error: '' };
         $('#food-results').innerHTML = foodResultsHtml(sheet.query);
       });
       if (document.activeElement !== search && !sheet.query) {
@@ -1591,12 +1577,17 @@
     ai.busy = true;
     ai.error = '';
     ai.items = null;
+    ai.webSearchUsed = false;
     renderSheet();
     try {
-      const items = await AI.analyze({ apiKey: data.settings.apiKey, text: ai.text, image: ai.image, mode: ai.mode });
+      const res = await AI.analyze({
+        apiKey: data.settings.apiKey, text: ai.text, image: ai.image, mode: ai.mode,
+        webSearch: data.settings.aiWebSearch !== false
+      });
       if (!sheet || !sheet.ai) return;
-      items.forEach(it => { it.selected = true; });
-      sheet.ai.items = items;
+      res.items.forEach(it => { it.selected = true; });
+      sheet.ai.items = res.items;
+      sheet.ai.webSearchUsed = res.webSearchUsed;
     } catch (err) {
       if (!sheet || !sheet.ai) return;
       sheet.ai.error = err.message;
@@ -1682,18 +1673,6 @@
         sheet.amount = null;
         renderSheet();
         break;
-      case 'off-search':
-        runOffSearch();
-        break;
-      case 'pick-off': {
-        const prod = sheet.off.results && sheet.off.results[parseInt(target.dataset.idx, 10)];
-        if (prod) {
-          sheet.food = offToFood(prod);
-          sheet.amount = null;
-          renderSheet();
-        }
-        break;
-      }
       case 'unpick-food':
         sheet.food = null;
         sheet.amount = null;

@@ -13,6 +13,17 @@ const AI = (() => {
     'Jedes erkennbare Lebensmittel wird ein eigenes Item. "menge" ist eine kurze deutsche ' +
     'Mengenangabe wie "1 Stück" oder "ca. 150 g". Alle Zahlen sind Ganzzahlen oder Dezimalzahlen mit Punkt.';
 
+  // Wird nur angehängt, wenn das Web-Search-Tool mitgesendet wird (Mahlzeit-Modus + Einstellung aktiv).
+  const WEB_SEARCH_INSTRUCTION =
+    ' Du hast Zugriff auf eine Websuche (fddb.info). Nutze sie SPARSAM und NUR bei ' +
+    'Markenprodukten oder Produkten von Restaurant-Ketten, deren Nährwerte du nicht mit ' +
+    'hoher Sicherheit (mindestens ca. 85 %) aus deinem Wissen schätzen kannst – z. B. ' +
+    '„Ehrmann High Protein Pudding“ oder ein spezieller Proteinriegel. Für übliche ' +
+    'Lebensmittel und Gerichte (Obst, Gemüse, Brot, Reis, Hausmannskost, typische ' +
+    'Portionen) schätze IMMER direkt ohne Suche. Höchstens eine kurze Suchanfrage pro ' +
+    'Produkt. Antworte auch nach einer Suche AUSSCHLIESSLICH mit dem geforderten JSON, ' +
+    'ohne Quellenangaben.';
+
   const LABEL_PROMPT =
     'Du liest Nährwerttabellen von Lebensmittelverpackungen. Der Nutzer schickt ein Foto ' +
     'eines Etiketts (Nährwerttabelle, ggf. mit Produktname). Lies die Werte EXAKT ab, ' +
@@ -74,32 +85,10 @@ const AI = (() => {
     return items;
   }
 
-  // mode: 'meal' (Standard) oder 'label' (Nährwerttabelle einer Packung).
-  // Liefert [{name, menge, basis?, kcal, p, f, kh}] oder wirft Error mit deutscher Meldung.
-  async function analyze({ apiKey, text, image, mode }) {
-    if (!apiKey) throw new Error('Kein API-Key hinterlegt. Bitte in den Einstellungen eintragen.');
-    if (!navigator.onLine) throw new Error('Keine Internetverbindung. Die KI-Erkennung braucht Netz.');
-    const isLabel = mode === 'label';
-    if (isLabel && !image) throw new Error('Für den Etikett-Modus bitte ein Foto der Nährwerttabelle wählen.');
-
-    const content = [];
-    if (image) {
-      content.push({
-        type: 'image',
-        source: { type: 'base64', media_type: image.mediaType, data: image.data }
-      });
-    }
-    content.push({
-      type: 'text',
-      text: text && text.trim()
-        ? text.trim()
-        : (isLabel
-          ? 'Lies die Nährwerttabelle auf dem Foto ab.'
-          : 'Analysiere das Foto und schätze die Nährwerte der abgebildeten Mahlzeit.')
-    });
-
+  // Ein Messages-Request mit Timeout und deutschen Fehlermeldungen; liefert das JSON-Ergebnis.
+  async function postMessages(apiKey, body, timeoutMs) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     let response;
     try {
       response = await fetch(API_URL, {
@@ -111,12 +100,7 @@ const AI = (() => {
           'anthropic-version': '2023-06-01',
           'anthropic-dangerous-direct-browser-access': 'true'
         },
-        body: JSON.stringify({
-          model: MODEL,
-          max_tokens: 1024,
-          system: isLabel ? LABEL_PROMPT : SYSTEM_PROMPT,
-          messages: [{ role: 'user', content }]
-        })
+        body: JSON.stringify(body)
       });
     } catch (e) {
       if (e && e.name === 'AbortError') {
@@ -136,13 +120,78 @@ const AI = (() => {
     if (!response.ok) {
       throw new Error(`Die Anfrage ist fehlgeschlagen (HTTP ${response.status}).`);
     }
+    return response.json();
+  }
 
-    const result = await response.json();
-    const textBlock = (result.content || []).find(b => b.type === 'text');
-    if (!textBlock) throw new Error('Die Antwort der KI war leer.');
+  // mode: 'meal' (Standard) oder 'label' (Nährwerttabelle einer Packung).
+  // webSearch: true erlaubt der KI im Mahlzeit-Modus die fddb-Recherche bei Markenprodukten.
+  // Liefert {items: [{name, menge, basis?, kcal, p, f, kh}], webSearchUsed}
+  // oder wirft Error mit deutscher Meldung.
+  async function analyze({ apiKey, text, image, mode, webSearch }) {
+    if (!apiKey) throw new Error('Kein API-Key hinterlegt. Bitte in den Einstellungen eintragen.');
+    if (!navigator.onLine) throw new Error('Keine Internetverbindung. Die KI-Erkennung braucht Netz.');
+    const isLabel = mode === 'label';
+    if (isLabel && !image) throw new Error('Für den Etikett-Modus bitte ein Foto der Nährwerttabelle wählen.');
+    const useSearch = !isLabel && webSearch === true;
 
+    const content = [];
+    if (image) {
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: image.mediaType, data: image.data }
+      });
+    }
+    content.push({
+      type: 'text',
+      text: text && text.trim()
+        ? text.trim()
+        : (isLabel
+          ? 'Lies die Nährwerttabelle auf dem Foto ab.'
+          : 'Analysiere das Foto und schätze die Nährwerte der abgebildeten Mahlzeit.')
+    });
+
+    const body = {
+      model: MODEL,
+      max_tokens: useSearch ? 2048 : 1024,
+      system: isLabel ? LABEL_PROMPT : (useSearch ? SYSTEM_PROMPT + WEB_SEARCH_INSTRUCTION : SYSTEM_PROMPT),
+      messages: [{ role: 'user', content }]
+    };
+    if (useSearch) {
+      body.tools = [{
+        type: 'web_search_20250305',
+        name: 'web_search',
+        max_uses: 3,
+        allowed_domains: ['fddb.info', 'fddb.mobi']
+      }];
+    }
+    const timeoutMs = useSearch ? 60000 : 30000;
+
+    let result = await postMessages(apiKey, body, timeoutMs);
+
+    // Server-Tool-Schleife pausiert (kommt bei Websuche vor): genau EIN Fortsetzungsversuch.
+    // Die API setzt am angehängten Assistant-Content selbst fort – kein extra User-Turn!
+    if (result.stop_reason === 'pause_turn' && Array.isArray(result.content)) {
+      body.messages = body.messages.concat([{ role: 'assistant', content: result.content }]);
+      result = await postMessages(apiKey, body, timeoutMs);
+    }
+
+    const blocks = Array.isArray(result.content) ? result.content : [];
+    const webSearchUsed = blocks.some(b => b.type === 'server_tool_use' || b.type === 'web_search_tool_result');
+    const textBlocks = blocks.filter(b => b.type === 'text' && typeof b.text === 'string');
+    if (textBlocks.length === 0) throw new Error('Die Antwort der KI war leer.');
+
+    // Bei Websuche kann die Antwort aus mehreren Text-Blöcken (mit Zitat-Streutext) bestehen:
+    // erst alle Blöcke zusammen versuchen, dann einzeln von hinten.
+    let parsed = null;
     try {
-      return normalizeItems(extractJson(textBlock.text));
+      parsed = extractJson(textBlocks.map(b => b.text).join('\n'));
+    } catch (e) {
+      for (let i = textBlocks.length - 1; i >= 0 && !parsed; i--) {
+        try { parsed = extractJson(textBlocks[i].text); } catch (e2) { /* nächster Block */ }
+      }
+    }
+    try {
+      return { items: normalizeItems(parsed), webSearchUsed };
     } catch (e) {
       throw new Error('Die KI-Antwort konnte nicht ausgewertet werden. Bitte erneut versuchen.');
     }

@@ -17,8 +17,9 @@ Safari öffnen → Teilen → „Zum Home-Bildschirm", dann startet die App im V
   aktiv, wenn ein Anthropic-API-Key hinterlegt ist.
 - **Meine Gerichte:** Einträge einer Mahlzeit als benanntes Gericht speichern
   und später mit einem Tap komplett buchen (Favoriten-Reiter).
-- **Online-Produktsuche:** Findet die lokale Datenbank nichts, sucht ein Klick
-  bei Open Food Facts (übertragen wird nur der Suchbegriff).
+- **KI-Webrecherche:** Bei Markenprodukten darf Claude optional die Nährwerte
+  online bei fddb nachschlagen (abschaltbar in den Einstellungen); übliche
+  Lebensmittel werden ohne Suche direkt geschätzt.
 - **Gewicht:** Schnelleingabe (auch nachtragen), Diagramm mit 7-Tage-Trend,
   Ziellinie und Meilensteinen, Prognose fürs Zielgewicht; optionale
   **Verbrauchs-Kalibrierung** aus dem eigenen Ess- und Wiegeprotokoll
@@ -95,8 +96,11 @@ Version laden.
 
 **Kosten & Datenschutz:** Jede Analyse kostet typischerweise unter 1 Cent
 (Modell Claude Haiku). Foto bzw. Text werden dafür an die Anthropic-API
-übertragen; sonst verlässt kein Datum das Gerät. Der Key liegt nur im
-localStorage des Browsers.
+übertragen. Bei aktivierter Online-Recherche darf Claude zusätzlich Nährwerte
+von Markenprodukten bei fddb nachschlagen — eine solche Recherche kostet etwas
+mehr als eine reine Analyse (Websuche ca. 1 Cent zzgl. Token) und wird per
+Prompt auf unsichere Markenprodukte beschränkt. Sonst verlässt kein Datum das
+Gerät. Der Key liegt nur im localStorage des Browsers.
 
 ## Datensicherung (wichtig!)
 
