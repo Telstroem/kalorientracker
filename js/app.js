@@ -149,15 +149,18 @@
     };
   }
 
-  function activeEnergyStats() {
-    return Calc.activeEnergyStats(data.activeEnergy, todayKey());
+  function activeEnergyStats(endKey) {
+    return Calc.activeEnergyStats(data.activeEnergy, endKey || todayKey());
   }
 
+  // Der Zuschlag eines Tages misst sich am Durchschnitt BIS zu diesem Tag. Sonst
+  // änderte ein heute nachgetragener Wert rückwirkend die Defizite vergangener
+  // Tage – und damit Verlauf, kumuliertes Defizit und CSV.
   function activityAdjustmentFor(key) {
     if (!data.settings.useActiveEnergy) return 0;
     const value = (data.activeEnergy || {})[key];
     if (typeof value !== 'number' || !isFinite(value)) return 0;
-    const stats = activeEnergyStats();
+    const stats = activeEnergyStats(key);
     return Calc.activityAdjustment(value, stats.avg, stats.count);
   }
 
