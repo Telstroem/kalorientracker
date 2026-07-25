@@ -54,7 +54,7 @@
   let sheet = null;   // { meal, tab, query, food, editing, ai: {...} }
   let ob = null;      // Onboarding: { step, values }
   let activeEdit = false;             // Inline-Feld für Aktivkalorien im Heute-Tab
-  let watchImport = { text: '', result: null }; // Sammel-Import Aktivkalorien
+  let watchImport = { text: '', result: null, leftover: 0 }; // Sammel-Import Aktivkalorien
 
   const MEALS = [
     { id: 'breakfast', label: 'Frühstück' },
@@ -62,16 +62,36 @@
     { id: 'dinner', label: 'Abendessen' },
     { id: 'snacks', label: 'Snacks' }
   ];
+  // Wochenangaben mit 7.700 kcal/kg gerechnet – derselbe Wert wie in Prognose und
+  // Kalibrierung. Die geläufigen „0,5 kg" stammen aus der US-Konvention (3.500 kcal
+  // je Pfund) und hätten hier 10 % zu viel versprochen.
   const DEFICITS = [
     { value: 0, label: 'Gewicht halten', desc: 'Kein Defizit' },
-    { value: 250, label: '−250 kcal/Tag', desc: '≈ 0,25 kg pro Woche' },
-    { value: 500, label: '−500 kcal/Tag', desc: '≈ 0,5 kg pro Woche' },
-    { value: 750, label: '−750 kcal/Tag', desc: '≈ 0,75 kg pro Woche' }
+    { value: 250, label: '−250 kcal/Tag', desc: '≈ 0,23 kg pro Woche' },
+    { value: 500, label: '−500 kcal/Tag', desc: '≈ 0,45 kg pro Woche' },
+    { value: 750, label: '−750 kcal/Tag', desc: '≈ 0,68 kg pro Woche' }
   ];
 
   // ---------- Abgeleitete Daten ----------
 
-  function persist() { Storage.save(data); }
+  // Ein fehlgeschlagenes Speichern (voller Speicher, Privatmodus) darf nicht stumm
+  // bleiben: die App liefe sonst rein im Arbeitsspeicher weiter und alles Erfasste
+  // wäre beim nächsten Start weg. Warnung einmal pro Sitzung, damit sie nicht nervt.
+  // Bewusst ein blockierender Hinweis statt eines Toasts: die Erfolgsmeldung der
+  // auslösenden Aktion („Eintrag hinzugefügt") würde einen Toast sofort überschreiben.
+  let saveFailed = false;
+  function persist() {
+    const ok = Storage.save(data);
+    if (!ok && !saveFailed) {
+      saveFailed = true;
+      setTimeout(() => alert(
+        'Die Daten konnten nicht gespeichert werden – der Speicher des Browsers ist voll oder gesperrt.\n\n' +
+        'Alles, was du ab jetzt einträgst, geht beim nächsten Start verloren. ' +
+        'Bitte in den Einstellungen einen Export erstellen und Speicherplatz freigeben.'), 0);
+    }
+    if (ok) saveFailed = false;
+    return ok;
+  }
 
   function emptyMeals() {
     return { breakfast: [], lunch: [], dinner: [], snacks: [] };
@@ -133,7 +153,9 @@
   function metricsFor(key) {
     const p = data.profile;
     const weight = weightOnOrBefore(key) ?? currentWeight();
-    const age = Calc.ageFromBirthYear(p.birthYear);
+    // Alter zum jeweiligen Tag, nicht das heutige – sonst verschöben sich über den
+    // Jahreswechsel rückwirkend TDEE, Defizit und CSV vergangener Tage.
+    const age = Calc.ageFromBirthYear(p.birthYear, dateFromKey(key));
     const bmr = Calc.bmr(p.sex, weight, p.heightCm, age);
     const formulaTdee = Calc.tdee(bmr, p.activity);
     const s = data.settings;
@@ -144,7 +166,7 @@
     const tdee = Math.max(1, baseTdee + activityAdj);
     return {
       weight, bmr, formulaTdee, baseTdee, activityAdj, tdee,
-      goal: Calc.calorieGoal(tdee, p.deficit),
+      goal: Calc.calorieGoal(tdee, p.deficit, bmr),
       proteinGoal: Calc.proteinGoal(weight, p.proteinPerKg)
     };
   }
@@ -432,7 +454,7 @@
       return `
         <div class="active-row">
           <span class="active-label">Aktivkalorien</span>
-          <input type="text" inputmode="numeric" id="active-input" placeholder="z. B. 640"
+          <input type="text" inputmode="numeric" id="active-input" aria-label="Aktivkalorien für den angezeigten Tag" placeholder="z. B. 640"
             value="${value != null ? esc(NF0.format(value)) : ''}">
           <button class="btn primary" data-action="save-active">OK</button>
         </div>`;
@@ -456,6 +478,12 @@
     const fc = latestTrend !== null
       ? Calc.forecast(latestTrend, p.targetWeightKg, dEficit.avg, dEficit.count)
       : null;
+    // Zweite Prognose direkt aus der gemessenen Trendsteigung – sie passt per
+    // Konstruktion zur Kurve daneben, während die Kalorienrechnung davon abweichen kann.
+    const slopeFit = Calc.trendSlope(trend.filter(t => t.key >= addDays(todayKey(), -27)));
+    const fcTrend = (latestTrend !== null && slopeFit)
+      ? Calc.forecastFromSlope(latestTrend, p.targetWeightKg, slopeFit.slope)
+      : null;
 
     const rangeDays = { '1m': 30, '3m': 91, '1y': 365, 'all': Infinity }[weightRange];
     const cutoff = rangeDays === Infinity ? '' : addDays(todayKey(), -rangeDays);
@@ -476,11 +504,14 @@
           ${watchCrossCheck(cal)}
         </div>`;
     } else if (cal) {
-      const higher = cal.tdee > mToday.formulaTdee + 25;
-      const lower = cal.tdee < mToday.formulaTdee - 25;
-      const note = higher
-        ? 'Dein realer Verbrauch liegt über der Formel.'
-        : (lower ? 'Dein realer Verbrauch liegt etwas unter der Formel.' : 'Beobachtung und Formel stimmen gut überein.');
+      // Abstufung, damit „etwas" nicht auch für mehrere hundert kcal steht.
+      const diff = cal.tdee - mToday.formulaTdee;
+      const strong = Math.abs(diff) >= 300;
+      const note = diff > 25
+        ? `Dein realer Verbrauch liegt ${strong ? 'deutlich ' : ''}über der Formel.`
+        : (diff < -25
+          ? `Dein realer Verbrauch liegt ${strong ? 'deutlich' : 'etwas'} unter der Formel.`
+          : 'Beobachtung und Formel stimmen gut überein.');
       calTile = `
         <div class="card tile wide">
           <div class="tile-value">Realer Verbrauch ≈ ${fmtKcal(cal.tdee)} kcal${calBandLabel(cal)}</div>
@@ -543,16 +574,16 @@
         <div class="inline-form">
           <input id="weight-input" type="text" inputmode="decimal" placeholder="z. B. 82,4"
             value="${dateWeight != null ? esc(NF1.format(dateWeight)) : ''}">
-          <button class="btn primary" data-action="save-weight">Speichern</button>
+          <button class="btn primary" data-action="save-weight" aria-label="Gewicht speichern">Speichern</button>
         </div>
         <label class="field-label waist-label" for="waist-input">Bauchumfang (cm) – optional</label>
         <div class="inline-form">
           <input id="waist-input" type="text" inputmode="decimal" placeholder="z. B. 96,5"
             value="${dateWaist != null ? esc(NFx.format(dateWaist)) : ''}">
-          <button class="btn" data-action="save-waist">Speichern</button>
+          <button class="btn" data-action="save-waist" aria-label="Bauchumfang speichern">Speichern</button>
         </div>
         <div class="weight-date">für
-          <label class="date-tap">${esc(dateLabel)}
+          <label class="date-tap" aria-label="Datum für Gewicht und Bauchumfang wählen">${esc(dateLabel)}
             <input type="date" id="weight-date" value="${weightDate}"
               max="${todayKey()}" min="${addDays(todayKey(), -365)}">
           </label>
@@ -583,7 +614,9 @@
           <div class="tile-label">Seit Start (${fmtKg(start)} kg)</div>
         </div>
         <div class="card tile">
-          <div class="tile-value">${latestTrend !== null ? signedKg(latestTrend - p.targetWeightKg) : '–'}</div>
+          <div class="tile-value">${latestTrend !== null
+            ? (latestTrend > p.targetWeightKg ? `noch ${fmtKg(latestTrend - p.targetWeightKg)} kg` : 'erreicht')
+            : '–'}</div>
           <div class="tile-label">Bis Ziel</div>
         </div>
         <div class="card tile">
@@ -592,13 +625,14 @@
         </div>
         <div class="card tile wide">
           <div class="tile-value">${fc ? esc(fc.date.toLocaleDateString('de-DE', { day: 'numeric', month: 'short', year: 'numeric' })) : '–'}</div>
-          <div class="tile-label">${fc ? 'Ziel voraussichtlich erreicht' : 'Prognose: noch nicht genug Daten'}</div>
+          <div class="tile-label">${fc ? 'Ziel voraussichtlich erreicht' : 'Prognose: noch nicht genug Daten'}${forecastCompareLabel(fcTrend, fc)}</div>
         </div>
-        ${calTile}
       </div>
+      ${targetReachedHint(latestTrend)}
       ${!fc ? `<p class="hint">Für eine Prognose braucht es mindestens 5 getrackte Tage mit einem durchschnittlichen Kaloriendefizit und einen Trend oberhalb des Zielgewichts.</p>` : ''}
       ${waistCard}
-      ${bodyTiles}`;
+      ${bodyTiles}
+      <div class="tile-grid">${calTile}</div>`;
 
     $('#view-weight').innerHTML = html;
 
@@ -609,6 +643,26 @@
         renderWeight();
       }
     });
+  }
+
+  // Beide Prognosen nebeneinander: die Kalorienrechnung nennt das Datum, die
+  // Trendsteigung sagt, was die Waage bisher tatsächlich hergibt.
+  function forecastCompareLabel(fcTrend, fc) {
+    if (!fcTrend) return '';
+    const days = `${NF0.format(fcTrend.days)} ${fcTrend.days === 1 ? 'Tag' : 'Tage'}`;
+    if (!fc) return ` · nach dem Gewichtstrend: noch ${days}`;
+    if (fcTrend.days === fc.days) return ' · deckt sich mit dem Gewichtstrend';
+    return ` · nach Kalorien ${NF0.format(fc.days)} Tage, nach Gewichtstrend ${days}`;
+  }
+
+  // Bei erreichtem Zielgewicht läuft das Defizit sonst unbemerkt weiter.
+  function targetReachedHint(latestTrend) {
+    if (latestTrend === null || !data.profile) return '';
+    if (latestTrend > data.profile.targetWeightKg) return '';
+    if (!(data.profile.deficit > 0)) return '';
+    return `<p class="hint important">Zielgewicht erreicht – das Tagesziel enthält weiterhin
+      ein Defizit von ${fmtKcal(data.profile.deficit)} kcal. In den Einstellungen auf
+      „Gewicht halten“ umstellen, wenn du das Gewicht jetzt halten willst.</p>`;
   }
 
   function signedKg(diff) {
@@ -625,9 +679,12 @@
     return '±0 cm';
   }
 
-  // „(± 130)“ – Unsicherheitsband aus der Streuung der Trendpunkte.
+  // „(± 130)“ – Schwankungsbreite aus der Streuung der Wiegewerte. nowrap, damit die
+  // Klammer nicht mitten im Wert umbricht.
   function calBandLabel(cal) {
-    return cal && cal.uncertainty ? ` (± ${fmtKcal(cal.uncertainty)})` : '';
+    return cal && cal.uncertainty
+      ? ` <span class="nowrap">(± ${fmtKcal(cal.uncertainty)})</span>`
+      : '';
   }
 
   function calCoverageLabel(cal) {
@@ -647,7 +704,9 @@
     const stats = activeEnergyStats();
     if (stats.avg === null || stats.count < 7) return '';
     const watchTotal = Math.round(metricsFor(todayKey()).bmr + stats.avg);
-    return `<div class="tile-label">Watch Ø ${fmtKcal(watchTotal)} (Ruhe + Aktiv) · beobachtet ${fmtKcal(cal.tdee)} kcal</div>`;
+    return `<div class="tile-label">Watch Ø ${fmtKcal(watchTotal)} (Ruhe + Aktiv) · beobachtet ${fmtKcal(cal.tdee)} kcal.
+      Die Watch-Summe rechnet die Verdauung nicht mit (rund 10 % der Aufnahme) und liegt deshalb
+      regelmäßig niedriger.</div>`;
   }
 
   // ---------- Rendering: Verlauf ----------
@@ -775,8 +834,9 @@
           <label class="span2">Aktivitätslevel
             <select data-setting="activity">
               ${Calc.ACTIVITY_LABELS.map((a, i) =>
-                `<option value="${i}" ${p.activity === i ? 'selected' : ''}>${a.name} – ${a.desc}</option>`).join('')}
+                `<option value="${i}" ${p.activity === i ? 'selected' : ''}>${a.name}</option>`).join('')}
             </select>
+            <span class="field-note" id="activity-note">${esc(activityDesc())}</span>
           </label>
           <label class="span2">Tagesdefizit
             <select data-setting="deficit">
@@ -808,7 +868,7 @@
           <input type="checkbox" data-setting="useActiveEnergy" ${data.settings.useActiveEnergy ? 'checked' : ''}>
         </label>
         <p class="hint" id="watch-status">${activeEnergyStatus()}</p>
-        <label class="field-label" for="watch-import" style="margin-top:10px">Werte sammeln eintragen (eine Zeile je Tag)</label>
+        <label class="field-label" for="watch-import" style="margin-top:10px">Mehrere Tage auf einmal eintragen (eine Zeile je Tag)</label>
         <textarea id="watch-import" rows="4" placeholder="25.07. 640&#10;24.07.2026 512&#10;2026-07-23;705">${esc(watchImport.text)}</textarea>
         <div class="btn-row" style="margin-top:10px">
           <button class="btn" data-action="watch-check">Prüfen</button>
@@ -883,9 +943,17 @@
       watchBox.addEventListener('input', () => {
         watchImport.text = watchBox.value;
         watchImport.result = null; // geänderter Text → erst wieder prüfen, dann übernehmen
+        watchImport.leftover = 0;
         refreshSettingsDerived();
       });
     }
+  }
+
+  // Die Beschreibung steht unter der Auswahl statt in der Option: im <select> wurde
+  // sie abgeschnitten, ausgerechnet beim zweitgrößten Hebel auf den Verbrauch.
+  function activityDesc() {
+    const a = Calc.ACTIVITY_LABELS[data.profile.activity];
+    return a ? a.desc : '';
   }
 
   function calcPreviewRows(m) {
@@ -905,6 +973,8 @@
     if (tdeeBox) tdeeBox.textContent = tdeeBasisStatus();
     const watchBox = $('#watch-status');
     if (watchBox) watchBox.textContent = activeEnergyStatus();
+    const actNote = $('#activity-note');
+    if (actNote) actNote.textContent = activityDesc();
     const previewBox = $('#watch-preview');
     if (previewBox) previewBox.textContent = watchImportPreview();
     const applyBtn = document.querySelector('[data-action="watch-apply"]');
@@ -934,7 +1004,14 @@
 
   function watchImportPreview() {
     const r = watchImport.result;
-    if (!r) return 'Formate: „25.07. 640“, „25.07.2026 640“ oder „2026-07-25;640“.';
+    if (!r) {
+      const pending = String(watchImport.text || '').trim();
+      if (pending) {
+        return 'Erst „Prüfen“ antippen, dann übernehmen. ' +
+          (watchImport.leftover ? `${NF0.format(watchImport.leftover)} Zeile(n) aus dem letzten Import konnten nicht gelesen werden – bitte korrigieren.` : '');
+      }
+      return 'Formate: „25.07. 640“, „25.07.2026 640“ oder „2026-07-25;640“.';
+    }
     const parts = [`${NF0.format(r.entries.length)} ${r.entries.length === 1 ? 'Tag' : 'Tage'} erkannt`];
     if (r.duplicates > 0) parts.push(`${NF0.format(r.duplicates)} doppelte ${r.duplicates === 1 ? 'Zeile' : 'Zeilen'} (jeweils der letzte Wert zählt)`);
     if (r.unclear.length > 0) {
@@ -1051,6 +1128,21 @@
   // weist alles andere strikt ab (kein stiller Teil-Parse). Definition in calc.js,
   // damit Formularparser und Mengen-Umrechner garantiert dieselbe Regel benutzen.
   const parseGermanFloat = Calc.parseGermanFloat;
+
+  // Optionales Nährwertfeld: leer = 0 bzw. unbekannt, gültige Zahl = Wert,
+  // alles andere wird abgelehnt. Früher machte `|| 0` aus „30 g“ stillschweigend
+  // eine Null – ausgerechnet beim Protein, der wichtigsten Kennzahl der App.
+  function readMacro(sel, label, emptyValue) {
+    const el = $(sel);
+    const raw = el ? el.value.trim() : '';
+    if (raw === '') return { ok: true, value: emptyValue };
+    const v = parseGermanFloat(raw);
+    if (v === null || v < 0) {
+      toast(`${label} nicht erkannt – bitte nur eine Zahl angeben, z. B. 12,5.`);
+      return { ok: false };
+    }
+    return { ok: true, value: v };
+  }
 
   // Weist ein Formularfeld ab: Meldung zeigen und den gespeicherten Wert wieder
   // eintragen. Nötig, seit die Einstellungen nicht mehr komplett neu gezeichnet
@@ -1517,14 +1609,16 @@
     return html;
   }
 
+  // Mengen-Etiketten bewusst OHNE Tausenderpunkt: sie werden vom Umrechner wieder
+  // eingelesen, und „1.200 g“ wäre dort nicht von 1,2 g zu unterscheiden.
   function computeFood(food, amount) {
     let factor, label;
     if (food.unit === 'stk') {
       factor = amount;
-      label = `${NFx.format(amount)} Stück`;
+      label = `${Calc.fmtQty(amount)} Stück`;
     } else {
       factor = amount / 100;
-      label = `${fmtG(amount)} ${food.unit === 'ml' ? 'ml' : 'g'}`;
+      label = `${Calc.fmtQty(Math.round(amount))} ${food.unit === 'ml' ? 'ml' : 'g'}`;
     }
     return {
       kcal: food.kcal * factor,
@@ -1731,7 +1825,7 @@
               <label>P (g)<input type="text" class="ai-p" inputmode="decimal" value="${esc(String(it.p).replace('.', ','))}"></label>
               <label>F (g)<input type="text" class="ai-f" inputmode="decimal" value="${esc(String(it.f).replace('.', ','))}"></label>
               <label>KH (g)<input type="text" class="ai-kh" inputmode="decimal" value="${esc(String(it.kh).replace('.', ','))}"></label>
-              <label>BS (g)<input type="text" class="ai-fib" inputmode="decimal" placeholder="?"
+              <label>Ballast.<input type="text" class="ai-fib" inputmode="decimal" placeholder="?"
                 value="${it.fib !== undefined ? esc(String(it.fib).replace('.', ',')) : ''}"></label>
             </div>
           </div>
@@ -1837,9 +1931,9 @@
   // statt sie als 1 g bzw. 0,5 ml zu buchen. Bei Stück-Lebensmitteln bleibt die Zahl.
   function parseAmountInput(value, foodUnit) {
     const s = String(value == null ? '' : value).trim();
-    const m = s.match(/^(\d+(?:[.,]\d+)?)\s*(kg|g|ml|l|stk\.?|stück|st\.?)?$/i);
+    const m = s.match(/^(\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?)\s*(kg|g|ml|l|stk\.?|stück|st\.?)?$/i);
     if (!m) return null;
-    const n = parseGermanFloat(m[1]);
+    const n = Calc.parseDisplayNumber(m[1]);
     if (n === null) return null;
     const unit = (m[2] || '').toLowerCase();
     const scalable = foodUnit === 'g' || foodUnit === 'ml';
@@ -1957,7 +2051,7 @@
       <div><strong>${NFx.format(vals.p)} g</strong><span>Protein</span></div>
       <div><strong>${NFx.format(vals.f)} g</strong><span>Fett</span></div>
       <div><strong>${NFx.format(vals.kh)} g</strong><span>KH</span></div>
-      <div><strong>${vals.fib !== undefined ? `${NFx.format(vals.fib)} g` : '–'}</strong><span>Ballastst.</span></div>`;
+      <div><strong>${vals.fib !== undefined ? `${NFx.format(vals.fib)} g` : '–'}</strong><span>Ballast.</span></div>`;
   }
 
   function updateFoodPreview() {
@@ -1983,21 +2077,26 @@
     ai.error = '';
     ai.items = null;
     ai.webSearchUsed = false;
+    // Das Ergebnis darf nur in genau dieses Sheet zurückfließen. Wird zwischenzeitlich
+    // geschlossen oder ein Eintrag bearbeitet, liefe es sonst in ein fremdes Formular
+    // (dessen ai:{} den alten Guard passierte) und überschriebe getippte Werte.
+    const owner = ai;
     renderSheet();
     try {
       const res = await AI.analyze({
         apiKey: data.settings.apiKey, text: ai.text, image: ai.image, mode: ai.mode,
         webSearch: data.settings.aiWebSearch !== false
       });
-      if (!sheet || !sheet.ai) return;
+      if (!sheet || sheet.ai !== owner) return;
       res.items.forEach(it => { it.selected = true; });
       sheet.ai.items = res.items;
       sheet.ai.webSearchUsed = res.webSearchUsed;
     } catch (err) {
-      if (!sheet || !sheet.ai) return;
+      if (!sheet || sheet.ai !== owner) { owner.busy = false; return; }
       sheet.ai.error = err.message;
     }
-    sheet.ai.busy = false;
+    owner.busy = false;
+    if (!sheet || sheet.ai !== owner) return;
     renderSheet();
   }
 
@@ -2208,14 +2307,15 @@
         const kcal = parseFloat($('#quick-kcal').value) || 0;
         if (!name) { toast('Bitte eine Bezeichnung angeben.'); break; }
         if (kcal <= 0) { toast('Bitte Kalorien angeben.'); break; }
-        const fibRaw = $('#quick-fib').value.trim();
+        const qp = readMacro('#quick-p', 'Protein', 0);
+        const qf = readMacro('#quick-f', 'Fett', 0);
+        const qkh = readMacro('#quick-kh', 'Kohlenhydrate', 0);
+        const qfib = readMacro('#quick-fib', 'Ballaststoffe', undefined);
+        if (!qp.ok || !qf.ok || !qkh.ok || !qfib.ok) break;
         addEntry(currentDay, sheet.meal, {
           name, amount: '',
           kcal,
-          p: parseGermanFloat($('#quick-p').value) || 0,
-          f: parseGermanFloat($('#quick-f').value) || 0,
-          kh: parseGermanFloat($('#quick-kh').value) || 0,
-          fib: fibRaw === '' ? undefined : (parseGermanFloat(fibRaw) ?? undefined)
+          p: qp.value, f: qf.value, kh: qkh.value, fib: qfib.value
         });
         showSheet(false);
         renderAll();
@@ -2286,19 +2386,19 @@
         const kcal = parseFloat($('#edit-kcal').value) || 0;
         if (!name) { toast('Bitte eine Bezeichnung angeben.'); break; }
         if (kcal <= 0) { toast('Bitte Kalorien angeben.'); break; }
+        const ep = readMacro('#edit-p', 'Protein', 0);
+        const ef = readMacro('#edit-f', 'Fett', 0);
+        const ekh = readMacro('#edit-kh', 'Kohlenhydrate', 0);
+        if (!ep.ok || !ef.ok || !ekh.ok) break;
         entry.name = name;
         entry.amount = $('#edit-amount').value.trim();
         entry.kcal = Math.round(kcal);
-        entry.p = Math.round((parseGermanFloat($('#edit-p').value) || 0) * 10) / 10;
-        entry.f = Math.round((parseGermanFloat($('#edit-f').value) || 0) * 10) / 10;
-        entry.kh = Math.round((parseGermanFloat($('#edit-kh').value) || 0) * 10) / 10;
-        const fibRaw = $('#edit-fib').value.trim();
-        const fibParsed = fibRaw === '' ? undefined : parseGermanFloat(fibRaw);
-        if (fibRaw !== '' && fibParsed === null) {
-          toast('Ballaststoffe nicht erkannt – bitte eine Zahl wie 4,5 angeben.');
-          break;
-        }
-        const fibNew = fibValue(fibParsed ?? undefined);
+        entry.p = Math.round(ep.value * 10) / 10;
+        entry.f = Math.round(ef.value * 10) / 10;
+        entry.kh = Math.round(ekh.value * 10) / 10;
+        const efib = readMacro('#edit-fib', 'Ballaststoffe', undefined);
+        if (!efib.ok) break;
+        const fibNew = fibValue(efib.value);
         if (fibNew === undefined) delete entry.fib; else entry.fib = fibNew;
         persist();
         showSheet(false);
@@ -2307,27 +2407,37 @@
         break;
       }
 
-      // Gewicht
-      case 'save-weight': {
-        const v = parseGermanFloat($('#weight-input').value);
-        if (v === null || v < 30 || v > 300) { toast('Bitte ein Gewicht zwischen 30 und 300 kg angeben.'); break; }
+      // Gewicht und Bauchumfang teilen sich das Datum und werden gemeinsam gespeichert:
+      // sonst löscht das Neuzeichnen nach dem einen Speichern den getippten anderen Wert
+      // (und ein anschließendes zweites Speichern landete auf dem falschen Tag).
+      case 'save-weight':
+      case 'save-waist': {
         const savedFor = weightDate;
-        data.weights[savedFor] = Math.round(v * 10) / 10;
+        const rawWeight = ($('#weight-input') || {}).value;
+        const rawWaist = ($('#waist-input') || {}).value;
+        const weightText = String(rawWeight == null ? '' : rawWeight).trim();
+        const waistText = String(rawWaist == null ? '' : rawWaist).trim();
+        const saved = [];
+
+        if (weightText !== '') {
+          const v = parseGermanFloat(weightText);
+          if (v === null || v < 30 || v > 300) { toast('Bitte ein Gewicht zwischen 30 und 300 kg angeben.'); break; }
+          data.weights[savedFor] = Math.round(v * 10) / 10;
+          saved.push('Gewicht');
+        }
+        if (waistText !== '') {
+          const v = parseGermanFloat(waistText);
+          if (v === null || v < 40 || v > 250) { toast('Bitte einen Bauchumfang zwischen 40 und 250 cm angeben.'); break; }
+          data.waist[savedFor] = Math.round(v * 10) / 10;
+          saved.push('Bauchumfang');
+        }
+        if (saved.length === 0) { toast('Bitte einen Wert eintragen.'); break; }
+
         weightDate = todayKey();
         persist();
         renderAll();
-        toast(savedFor === todayKey() ? 'Gewicht gespeichert' : `Gewicht für ${fmtDateShort(savedFor)} gespeichert`);
-        break;
-      }
-      case 'save-waist': {
-        const v = parseGermanFloat($('#waist-input').value);
-        if (v === null || v < 40 || v > 250) { toast('Bitte einen Bauchumfang zwischen 40 und 250 cm angeben.'); break; }
-        const savedFor = weightDate;
-        data.waist[savedFor] = Math.round(v * 10) / 10;
-        weightDate = todayKey();
-        persist();
-        renderWeight();
-        toast(savedFor === todayKey() ? 'Bauchumfang gespeichert' : `Bauchumfang für ${fmtDateShort(savedFor)} gespeichert`);
+        const what = saved.join(' und ');
+        toast(savedFor === todayKey() ? `${what} gespeichert` : `${what} für ${fmtDateShort(savedFor)} gespeichert`);
         break;
       }
       case 'weight-range':
@@ -2382,7 +2492,7 @@
         res.entries.forEach(e => { data.activeEnergy[e.key] = e.kcal; });
         const count = res.entries.length;
         // Unklare Zeilen bleiben stehen, damit sie nachgebessert werden können.
-        watchImport = { text: res.unclear.join('\n'), result: null };
+        watchImport = { text: res.unclear.join('\n'), result: null, leftover: res.unclear.length };
         persist();
         renderAll();
         toast(res.unclear.length > 0
@@ -2462,8 +2572,16 @@
         const imported = Storage.parseImport(reader.result);
         const days = Object.keys(imported.days).length;
         const weights = Object.keys(imported.weights).length;
+        const dropped = Storage.importReport().dropped;
+        const warn = dropped > 0
+          ? `\n\nAchtung: ${NF0.format(dropped)} ${dropped === 1 ? 'Eintrag ist' : 'Einträge sind'} beschädigt und ${dropped === 1 ? 'wird' : 'werden'} nicht übernommen.`
+          : '';
         if (confirm(`Import ersetzt alle vorhandenen Daten durch den Export ` +
-            `(${NF0.format(days)} Tage, ${NF0.format(weights)} Wiegeeinträge). Fortfahren?`)) {
+            `(${NF0.format(days)} Tage, ${NF0.format(weights)} Wiegeeinträge).${warn}\n\nFortfahren?`)) {
+          // Der Key steht nicht im Export – den auf diesem Gerät hinterlegten behalten.
+          if (!imported.settings.apiKey && data.settings.apiKey) {
+            imported.settings.apiKey = data.settings.apiKey;
+          }
           data = imported;
           persist();
           currentDay = todayKey();
@@ -2485,6 +2603,33 @@
       navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW-Registrierung fehlgeschlagen:', err));
     });
   }
+
+  // ---------- Tageswechsel ----------
+  // Eine installierte PWA wird aus dem App-Switcher ohne Reload reaktiviert. Ohne
+  // diese Prüfung bliebe currentDay über Mitternacht auf gestern stehen – neue
+  // Einträge, Gewichte und Aktivkalorien landeten dann auf dem Vortag.
+
+  let lastSeenDay = todayKey();
+
+  function checkDayRollover() {
+    const today = todayKey();
+    if (today === lastSeenDay) return;
+    const wasOnPreviousToday = currentDay === lastSeenDay;
+    lastSeenDay = today;
+    if (wasOnPreviousToday) currentDay = today;
+    if (weightDate < today && weightDate === currentDay) weightDate = today;
+    activeEdit = false;
+    if (data.profile) {
+      refreshAppliedTdee();
+      renderAll();
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) checkDayRollover();
+  });
+  window.addEventListener('pageshow', checkDayRollover);
+  window.addEventListener('focus', checkDayRollover);
 
   // ---------- Start ----------
 

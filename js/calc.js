@@ -28,6 +28,16 @@ const Calc = (() => {
     return String(Math.round(n * 10) / 10).replace('.', ',');
   }
 
+  // Zahlen aus ANGEZEIGTEN Texten (Mengenangaben, Importzeilen). Anders als
+  // parseGermanFloat wird hier "1.200" als Tausendergruppe gelesen – die App
+  // formatiert Mengen selbst so, und "1.200 g" darf nicht als 1,2 g zurückkommen.
+  function parseDisplayNumber(raw) {
+    const s = String(raw == null ? '' : raw).trim();
+    if (/^\d{1,3}(\.\d{3})+$/.test(s)) return parseInt(s.replace(/\./g, ''), 10);
+    if (/^\d{1,3}(\.\d{3})+,\d+$/.test(s)) return parseFloat(s.replace(/\./g, '').replace(',', '.'));
+    return parseGermanFloat(s);
+  }
+
   function ageFromBirthYear(birthYear, refDate) {
     const now = refDate || new Date();
     return Math.max(10, Math.min(120, now.getFullYear() - birthYear));
@@ -43,8 +53,14 @@ const Calc = (() => {
     return Math.round(bmrValue * factor);
   }
 
-  function calorieGoal(tdeeValue, deficit) {
-    return Math.max(1000, tdeeValue - deficit);
+  // Untergrenze: nie unter den Ruheumsatz. Ohne diese Kopplung konnte das Ziel über
+  // eine tief kalibrierte Basis plus Watch-Abzug plus Defizit rechnerisch bei 1.000 kcal
+  // landen – bei Franks BMR von rund 1.850 wäre das keine Diät mehr.
+  function calorieGoal(tdeeValue, deficit, bmrValue) {
+    const floor = (typeof bmrValue === 'number' && isFinite(bmrValue) && bmrValue > 0)
+      ? Math.max(1200, Math.round(bmrValue))
+      : 1000;
+    return Math.max(floor, tdeeValue - deficit);
   }
 
   function proteinGoal(weightKg, gramsPerKg) {
@@ -57,15 +73,16 @@ const Calc = (() => {
 
   // entries: [{ key: 'YYYY-MM-DD', weight: number }] aufsteigend sortiert.
   // Liefert pro Eintrag den gleitenden Schnitt der Wiegewerte der letzten 7 Kalendertage.
+  // Abgrenzung über Datumsschlüssel statt über Millisekunden: die Nacht der
+  // Zeitumstellung hat 25 Stunden, wodurch das Fenster sonst sechs Tage lang
+  // einen Messwert zu wenig enthielte.
   function weightTrend(entries) {
     const sorted = entries.slice().sort((a, b) => a.key < b.key ? -1 : 1);
     return sorted.map((entry, i) => {
-      const end = dateFromKey(entry.key).getTime();
-      const start = end - 6 * 86400000;
+      const startKey = keyShift(entry.key, -6);
       let sum = 0, count = 0;
       for (let j = i; j >= 0; j--) {
-        const t = dateFromKey(sorted[j].key).getTime();
-        if (t < start) break;
+        if (sorted[j].key < startKey) break;
         sum += sorted[j].weight;
         count++;
       }
@@ -81,6 +98,19 @@ const Calc = (() => {
     const kgToLose = trendWeight - targetWeight;
     if (kgToLose <= 0) return null;
     const days = Math.round(kgToLose * KCAL_PER_KG_FAT / avgDeficit);
+    if (!isFinite(days) || days <= 0 || days > 3650) return null;
+    const date = new Date();
+    date.setDate(date.getDate() + days);
+    return { days, date };
+  }
+
+  // Prognose aus der gemessenen Trendsteigung statt aus dem Kalorienmittel.
+  // slopePerDay: kg/Tag, negativ = Abnahme (aus trendSlope()).
+  function forecastFromSlope(trendWeight, targetWeight, slopePerDay) {
+    if (!isFinite(trendWeight) || !isFinite(slopePerDay) || slopePerDay >= 0) return null;
+    const kgToLose = trendWeight - targetWeight;
+    if (kgToLose <= 0) return null;
+    const days = Math.round(kgToLose / -slopePerDay);
     if (!isFinite(days) || days <= 0 || days > 3650) return null;
     const date = new Date();
     date.setDate(date.getDate() + days);
@@ -157,11 +187,12 @@ const Calc = (() => {
   // "1 Portion (30 g)" → [{value:1,…,unit:''},{value:30,…,unit:'g'}]
   function quantityNumbers(text) {
     const s = String(text == null ? '' : text);
-    const re = /\d+(?:[.,]\d+)?/g;
+    // Tausendergruppen zuerst, sonst würde "1.200" als "1" + ".200" zerfallen.
+    const re = /\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?/g;
     const out = [];
     let m;
     while ((m = re.exec(s)) !== null) {
-      const value = parseGermanFloat(m[0]);
+      const value = parseDisplayNumber(m[0]);
       if (value === null) continue;
       const unitMatch = s.slice(m.index + m[0].length).match(UNIT_AFTER_RE);
       out.push({ value, index: m.index, raw: m[0], unit: unitMatch ? unitMatch[1].toLowerCase() : '' });
@@ -328,15 +359,21 @@ const Calc = (() => {
     out.trackedInSpan = inSpan.length;
     out.coverage = inSpan.length / out.windowDays;
     if (out.coverage < 0.75) { out.reason = 'coverage'; return out; }
+    // Mindestens 14 Tage müssen INNERHALB der Wiege-Spanne liegen: nur dort ist die
+    // Aufnahme durch eine gemessene Gewichtsänderung gedeckt.
+    if (inSpan.length < 14) { out.reason = 'few-days'; return out; }
     out.reason = null;
-    out.intakes = intakes;
+    out.intakes = inSpan;
     out.trend = trend;
     return out;
   }
 
   // Realer Verbrauch aus Essprotokoll + Gewichtstrend.
+  // Ø-Aufnahme und Gewichtssteigung müssen denselben Zeitraum abdecken – sonst geht
+  // eine Phase, in der zwar gegessen, aber nicht gewogen wurde (Urlaub), voll in den
+  // Verbrauch ein. Deshalb rechnet avgIntake über win.intakes = die Wiege-Spanne.
   // trendEntries: [{ key, trend }] aufsteigend, dayIntakes: [{ key, kcal }] getrackte Tage,
-  // endKey: Fensterende (heute). Fenster: 28 Tage, min. 14 getrackte Tage,
+  // endKey: Fensterende (heute). Fenster: 28 Tage, min. 14 getrackte Tage in der Spanne,
   // >= 2 Wiegungen pro Woche, mindestens 75 % der Spanntage erfasst.
   // rawEntries: [{ key, weight }] – die ungeglätteten Wiegewerte. Sie liefern das
   // Unsicherheitsband: die Residuen der 7-Tage-Trendpunkte sind stark autokorreliert,
@@ -359,7 +396,11 @@ const Calc = (() => {
         .filter(e => e && e.key >= firstKey && e.key <= lastKey)
         .map(e => ({ key: e.key, trend: e.weight })))
       : null;
-    const band = (rawFit || fit).slopeSe * KCAL_PER_KG_FAT;
+    // Tagesgewichte sind stark autokorreliert (Wasser, Glykogen halten mehrere Tage).
+    // Der iid-Standardfehler unterschätzt die Streuung dadurch etwa um die Hälfte;
+    // Faktor 2 bringt das Band auf die tatsächlich beobachtete Schwankungsbreite.
+    const AUTOCORR_FACTOR = 2;
+    const band = (rawFit || fit).slopeSe * KCAL_PER_KG_FAT * AUTOCORR_FACTOR;
     return {
       tdee,
       confidence: Math.min(win.intakes.length / 28, 1),
@@ -377,11 +418,14 @@ const Calc = (() => {
   // Effektiver TDEE: gedämpfte Mischung aus Formel und Beobachtung.
   // Beobachtungsgewicht wächst mit Datenmenge (days/56, max. 0,75),
   // Ergebnis hart auf ±25 % um den Formel-TDEE begrenzt.
+  // days ist die Zahl getrackter Tage im 28-Tage-Fenster und damit <= 28: der Nenner
+  // muss 28 sein, damit der dokumentierte Deckel von 0,75 überhaupt erreichbar ist
+  // (mit /56 lag das Gewicht strukturell nie über 0,5).
   function effectiveTdee(formulaTdee, calibration) {
     if (!calibration || !isFinite(formulaTdee) || formulaTdee <= 0) {
       return { tdee: Math.round(formulaTdee), blended: false, weight: 0 };
     }
-    const weight = Math.min(calibration.days / 56, 0.75);
+    const weight = Math.min(calibration.days / 28, 0.75);
     let mixed = formulaTdee * (1 - weight) + calibration.tdee * weight;
     mixed = Math.min(formulaTdee * 1.25, Math.max(formulaTdee * 0.75, mixed));
     return { tdee: Math.round(mixed), blended: true, weight };
@@ -440,16 +484,16 @@ const Calc = (() => {
       const year = Number(refKey.slice(0, 4));
       const mmdd = `${padNum(Number(m[2]))}-${padNum(Number(m[1]))}`;
       let key = `${year}-${mmdd}`;
-      if (key > refKey) key = `${year - 1}-${mmdd}`;
+      // Ein Datum knapp in der Zukunft ist ein Tippfehler oder eine Zeitzonenkante,
+      // kein Eintrag vom Vorjahr – nur deutlich spätere Daten aufs Vorjahr ziehen.
+      if (key > refKey && daysBetween(refKey, key) > 3) key = `${year - 1}-${mmdd}`;
       return validDateKey(key);
     }
     return null;
   }
 
   function parseKcalToken(token) {
-    const t = String(token).trim();
-    if (/^\d{1,3}(\.\d{3})+$/.test(t)) return parseInt(t.replace(/\./g, ''), 10);
-    return parseGermanFloat(t);
+    return parseDisplayNumber(token);
   }
 
   // Zeilenparser für den Sammel-Import der Aktivkalorien.
@@ -464,10 +508,10 @@ const Calc = (() => {
       const parts = line.split(/[\t;]+|\s+/).filter(Boolean);
       if (parts.length < 2) { unclear.push(line); return; }
       const key = parseDateToken(parts[0], refKey);
-      let kcal = null;
-      for (let i = parts.length - 1; i >= 1 && kcal === null; i--) {
-        kcal = parseKcalToken(parts[i]);
-      }
+      // Mehrdeutige Zeilen ("640 kcal von 700 kcal Ziel") lieber melden, als still
+      // die falsche Zahl zu nehmen.
+      const numbers = parts.slice(1).map(parseKcalToken).filter(n => n !== null);
+      const kcal = numbers.length === 1 ? numbers[0] : null;
       if (key === null || kcal === null || kcal < 0 || kcal > 10000) { unclear.push(line); return; }
       if (byKey.has(key)) duplicates++;
       byKey.set(key, Math.round(kcal));
@@ -486,9 +530,9 @@ const Calc = (() => {
 
   return {
     ACTIVITY_FACTORS, ACTIVITY_LABELS, KCAL_PER_KG_FAT, FIBER_GOAL_G,
-    parseGermanFloat, fmtQty,
+    parseGermanFloat, parseDisplayNumber, fmtQty,
     ageFromBirthYear, bmr, tdee, calorieGoal, proteinGoal,
-    dayDeficit, weightTrend, forecast, milestones, nextMilestone,
+    dayDeficit, weightTrend, forecast, forecastFromSlope, milestones, nextMilestone,
     bmi, bmiCategory, whtr, whtrCategory,
     quantityNumbers, diffFactor, scaleAnchor,
     isoWeek, weeklyStats, trendSlope, calibrationWindow, calibratedTdee,

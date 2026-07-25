@@ -23,10 +23,13 @@ const Storage = (() => {
     };
   }
 
-  // Übernimmt nur endliche Zahlen im gültigen Bereich (greift beim Laden UND beim Import).
+  // Übernimmt nur endliche Zahlen im gültigen Bereich unter einem echten Datums-
+  // schlüssel (greift beim Laden UND beim Import). Ein Schlüssel wie "kaputt" würde
+  // sonst hinter allen Datumsangaben einsortieren und als aktuellster Wert gelten.
   function numberMap(source, min, max) {
     const out = {};
     Object.keys(source || {}).forEach(key => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return;
       const value = source[key];
       if (typeof value === 'number' && isFinite(value) && value >= min && value <= max) out[key] = value;
     });
@@ -88,7 +91,7 @@ const Storage = (() => {
     const merged = Object.assign(base, data);
     merged.settings = Object.assign({ theme: 'system', apiKey: '' }, data.settings || {});
     merged.days = sanitizeDays(data.days);
-    merged.weights = numberMap(data.weights, -Infinity, Infinity);
+    merged.weights = numberMap(data.weights, 30, 300);
     merged.waist = numberMap(data.waist, 20, 300);
     merged.activeEnergy = numberMap(data.activeEnergy, 0, 10000);
     // Gespeicherte Elemente landen per 1-Tap direkt in einem Tag – hier gilt dieselbe
@@ -148,13 +151,34 @@ const Storage = (() => {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  // Der API-Key bleibt draußen: Exporte landen in iCloud, Mail oder Downloads.
+  // Beim Import wird der auf dem Gerät hinterlegte Key deshalb beibehalten.
   function exportJson(data) {
-    download(`kalorientracker-export-${dateStamp()}.json`, JSON.stringify(data, null, 2), 'application/json');
+    const copy = Object.assign({}, data, {
+      settings: Object.assign({}, data.settings, { apiKey: '' })
+    });
+    download(`kalorientracker-export-${dateStamp()}.json`, JSON.stringify(copy, null, 2), 'application/json');
   }
 
   function exportCsv(csvText) {
     download(`kalorientracker-tage-${dateStamp()}.csv`, csvText, 'text/csv;charset=utf-8');
   }
+
+  // Zählt Einträge in einer rohen days-Struktur, ohne an ihr Format zu glauben.
+  function countEntries(days) {
+    let n = 0;
+    Object.keys(days && typeof days === 'object' ? days : {}).forEach(key => {
+      const meals = days[key] && days[key].meals;
+      if (!meals || typeof meals !== 'object') return;
+      MEAL_IDS.forEach(id => { if (Array.isArray(meals[id])) n += meals[id].length; });
+    });
+    return n;
+  }
+
+  // Was der letzte Import verworfen hat – damit eine beschädigte Sicherung nicht
+  // kommentarlos als „erfolgreich“ durchgeht.
+  let lastImportReport = { dropped: 0 };
+  function importReport() { return lastImportReport; }
 
   // Wirft Error mit deutscher Meldung bei ungültigen Daten.
   function parseImport(text) {
@@ -171,8 +195,11 @@ const Storage = (() => {
     if (parsed.version > CURRENT_VERSION) {
       throw new Error('Der Export stammt aus einer neueren App-Version.');
     }
-    return migrate(parsed);
+    const before = countEntries(parsed.days);
+    const result = migrate(parsed);
+    lastImportReport = { dropped: Math.max(0, before - countEntries(result.days)) };
+    return result;
   }
 
-  return { load, save, clearAll, exportJson, exportCsv, parseImport, defaults };
+  return { load, save, clearAll, exportJson, exportCsv, parseImport, importReport, defaults };
 })();

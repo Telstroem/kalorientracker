@@ -3,6 +3,10 @@
 :root {
   --accent: #2e9e6b;
   --accent-soft: rgba(46, 158, 107, 0.14);
+  /* Eigene Fläche für Primärbuttons: der Akzent selbst trägt weiße Schrift nur
+     mit 3,4:1 – zu wenig für Text (AA verlangt 4,5:1). */
+  --accent-btn: #187c51;
+  --accent-btn-text: #ffffff;
   --warn: #d96545;
   --caution: #c9a11c;
   --over: #b95e14;
@@ -22,6 +26,8 @@
   :root:not([data-theme="light"]) {
     --accent: #3cbf82;
     --accent-soft: rgba(60, 191, 130, 0.16);
+    --accent-btn: #3cbf82;
+    --accent-btn-text: #0e0f12;
     --warn: #e57a58;
     --caution: #d9b649;
     --over: #d07a2e;
@@ -40,6 +46,8 @@
 :root[data-theme="dark"] {
   --accent: #3cbf82;
   --accent-soft: rgba(60, 191, 130, 0.16);
+  --accent-btn: #3cbf82;
+  --accent-btn-text: #0e0f12;
   --warn: #e57a58;
   --caution: #d9b649;
   --over: #d07a2e;
@@ -125,7 +133,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   font-size: 0.95rem;
   text-align: center;
 }
-.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary { background: var(--accent-btn); color: var(--accent-btn-text); }
 .btn.danger { background: var(--warn); color: #fff; }
 .btn.full { width: 100%; margin-top: 14px; }
 .btn:disabled { opacity: 0.55; }
@@ -169,11 +177,15 @@ textarea { resize: vertical; }
 .weight-date { margin-top: 10px; font-size: 0.85rem; color: var(--muted); }
 .date-tap {
   position: relative;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   color: var(--accent);
   font-weight: 600;
   cursor: pointer;
-  padding: 4px 2px;
+  padding: 4px 8px;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
 }
 .date-tap input[type="date"] {
   position: absolute;
@@ -294,7 +306,7 @@ textarea { resize: vertical; }
 .meal-title { font-weight: 700; font-size: 1rem; flex: 1; }
 .meal-sum { font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .add-btn {
-  width: 32px; height: 32px;
+  width: 44px; height: 44px;
   border-radius: 50%;
   background: var(--accent-soft);
   color: var(--accent);
@@ -472,7 +484,7 @@ textarea { resize: vertical; }
   color: var(--muted);
   background: var(--input-bg);
 }
-.sheet-tabs button.active { background: var(--accent); color: #fff; }
+.sheet-tabs button.active { background: var(--accent-btn); color: var(--accent-btn-text); }
 .sheet-body {
   padding: 14px 16px 20px;
   overflow-y: auto;
@@ -713,3 +725,6 @@ input.input-error { box-shadow: 0 0 0 2px var(--warn); }
 
   #tabbar { border-radius: 0; }
 }
+
+.nowrap { white-space: nowrap; }
+.field-note { display: block; margin-top: 4px; font-size: 0.8rem; color: var(--muted); font-weight: 400; }
