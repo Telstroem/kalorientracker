@@ -9,9 +9,12 @@ const AI = (() => {
     'Du bist ein Ernährungsassistent. Der Nutzer beschreibt eine Mahlzeit als Text oder Foto. ' +
     'Schätze realistisch die Nährwerte für übliche deutsche Portionsgrößen. ' +
     'Antworte AUSSCHLIESSLICH mit JSON in genau diesem Format, ohne Erklärungen, ohne Markdown: ' +
-    '{"items":[{"name":"…","menge":"…","kcal":0,"protein_g":0,"fett_g":0,"kh_g":0}]} ' +
-    'Jedes erkennbare Lebensmittel wird ein eigenes Item. "menge" ist eine kurze deutsche ' +
-    'Mengenangabe wie "1 Stück" oder "ca. 150 g". Alle Zahlen sind Ganzzahlen oder Dezimalzahlen mit Punkt.';
+    '{"items":[{"name":"…","menge":"…","kcal":0,"protein_g":0,"fett_g":0,"kh_g":0,"ballaststoffe_g":0}]} ' +
+    'Jedes erkennbare Lebensmittel wird ein eigenes Item. "menge" MUSS mit einer Zahl und ' +
+    'einer Einheit beginnen, z. B. "150 g", "250 ml" oder "2 Stück (je 60 g)" – niemals ' +
+    '"ca.", "etwa" oder eine Angabe ohne Zahl. "ballaststoffe_g" nur angeben, wenn du den ' +
+    'Wert einschätzen kannst, sonst das Feld weglassen. ' +
+    'Alle Zahlen sind Ganzzahlen oder Dezimalzahlen mit Punkt.';
 
   // Wird nur angehängt, wenn das Web-Search-Tool mitgesendet wird (Mahlzeit-Modus + Einstellung aktiv).
   const WEB_SEARCH_INSTRUCTION =
@@ -29,12 +32,14 @@ const AI = (() => {
     'eines Etiketts (Nährwerttabelle, ggf. mit Produktname). Lies die Werte EXAKT ab, ' +
     'nicht schätzen. Antworte AUSSCHLIESSLICH mit JSON in genau diesem Format, ohne ' +
     'Erklärungen, ohne Markdown: ' +
-    '{"items":[{"name":"…","menge":"…","basis":"100g","kcal":0,"protein_g":0,"fett_g":0,"kh_g":0}]} ' +
+    '{"items":[{"name":"…","menge":"…","basis":"100g","kcal":0,"protein_g":0,"fett_g":0,"kh_g":0,"ballaststoffe_g":0}]} ' +
     'Erzeuge ein Item mit basis "100g" für die Spalte pro 100 g bzw. 100 ml ' +
     '(menge dann "100 g" oder "100 ml"). Wenn die Tabelle zusätzlich eine Portionsspalte ' +
     'ausweist, erzeuge ein zweites Item mit basis "portion" und der Portionsgröße als menge ' +
     '(z. B. "1 Portion (30 g)"). "name" ist der Produktname, falls erkennbar, sonst eine kurze ' +
     'Beschreibung. Steht nur kJ auf dem Etikett, rechne in kcal um (kcal = kJ / 4,184). ' +
+    '"ballaststoffe_g" nur setzen, wenn die Tabelle Ballaststoffe ausweist – sonst das Feld ' +
+    'weglassen (nicht schätzen, nicht 0 erfinden). ' +
     'Alle Zahlen sind Ganzzahlen oder Dezimalzahlen mit Punkt.';
 
   // Verkleinert ein Bild clientseitig auf max. maxDim px Kantenlänge → JPEG base64.
@@ -70,6 +75,14 @@ const AI = (() => {
     return JSON.parse(t.slice(start, end + 1));
   }
 
+  // Fehlende Ballaststoffangabe bleibt undefined (= unbekannt) und wird NICHT als 0 erfunden.
+  function fiberOrUnknown(raw) {
+    if (raw === null || raw === undefined || raw === '') return undefined;
+    const value = Number(raw);
+    if (!isFinite(value) || value < 0) return undefined;
+    return Math.round(value * 10) / 10;
+  }
+
   function normalizeItems(parsed) {
     if (!parsed || !Array.isArray(parsed.items)) throw new Error('parse');
     const items = parsed.items.map(it => ({
@@ -79,7 +92,8 @@ const AI = (() => {
       kcal: Math.max(0, Math.round(Number(it.kcal) || 0)),
       p: Math.max(0, Math.round((Number(it.protein_g) || 0) * 10) / 10),
       f: Math.max(0, Math.round((Number(it.fett_g) || 0) * 10) / 10),
-      kh: Math.max(0, Math.round((Number(it.kh_g) || 0) * 10) / 10)
+      kh: Math.max(0, Math.round((Number(it.kh_g) || 0) * 10) / 10),
+      fib: fiberOrUnknown(it.ballaststoffe_g)
     })).filter(it => it.kcal > 0 || it.name !== 'Unbekannt');
     if (items.length === 0) throw new Error('parse');
     return items;
@@ -125,7 +139,7 @@ const AI = (() => {
 
   // mode: 'meal' (Standard) oder 'label' (Nährwerttabelle einer Packung).
   // webSearch: true erlaubt der KI im Mahlzeit-Modus die fddb-Recherche bei Markenprodukten.
-  // Liefert {items: [{name, menge, basis?, kcal, p, f, kh}], webSearchUsed}
+  // Liefert {items: [{name, menge, basis?, kcal, p, f, kh, fib?}], webSearchUsed}
   // oder wirft Error mit deutscher Meldung.
   async function analyze({ apiKey, text, image, mode, webSearch }) {
     if (!apiKey) throw new Error('Kein API-Key hinterlegt. Bitte in den Einstellungen eintragen.');

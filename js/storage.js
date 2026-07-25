@@ -12,10 +12,22 @@ const Storage = (() => {
       settings: { theme: 'system', apiKey: '' },
       days: {},      // 'YYYY-MM-DD' → { meals: { breakfast:[], lunch:[], dinner:[], snacks:[] } }
       weights: {},   // 'YYYY-MM-DD' → kg (Zahl, 1 Dezimalstelle)
-      favorites: [], // { name, amount, kcal, p, f, kh }
+      waist: {},     // 'YYYY-MM-DD' → Bauchumfang in cm (Zahl)
+      activeEnergy: {}, // 'YYYY-MM-DD' → Aktivkalorien (Apple Watch) in kcal
+      favorites: [], // { name, amount, kcal, p, f, kh, fib? }
       recents: [],   // dito, max. 50
-      dishes: []     // { name, items: [{ name, amount, kcal, p, f, kh }] }
+      dishes: []     // { name, items: [{ name, amount, kcal, p, f, kh, fib? }] }
     };
+  }
+
+  // Übernimmt nur endliche Zahlen im gültigen Bereich (greift beim Laden UND beim Import).
+  function numberMap(source, min, max) {
+    const out = {};
+    Object.keys(source || {}).forEach(key => {
+      const value = source[key];
+      if (typeof value === 'number' && isFinite(value) && value >= min && value <= max) out[key] = value;
+    });
+    return out;
   }
 
   function migrate(data) {
@@ -24,11 +36,9 @@ const Storage = (() => {
     const merged = Object.assign(base, data);
     merged.settings = Object.assign({ theme: 'system', apiKey: '' }, data.settings || {});
     merged.days = data.days || {};
-    merged.weights = {};
-    Object.keys(data.weights || {}).forEach(key => {
-      const value = data.weights[key];
-      if (typeof value === 'number' && isFinite(value)) merged.weights[key] = value;
-    });
+    merged.weights = numberMap(data.weights, -Infinity, Infinity);
+    merged.waist = numberMap(data.waist, 20, 300);
+    merged.activeEnergy = numberMap(data.activeEnergy, 0, 10000);
     merged.favorites = Array.isArray(data.favorites) ? data.favorites : [];
     merged.recents = Array.isArray(data.recents) ? data.recents : [];
     merged.dishes = Array.isArray(data.dishes)

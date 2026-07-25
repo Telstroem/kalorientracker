@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_VERSION = 'kt-v7';
+const CACHE_VERSION = 'kt-v8';
 
 const ASSETS = [
   './',

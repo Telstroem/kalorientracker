@@ -48,11 +48,13 @@ const Charts = (() => {
   // Gewichtsdiagramm: Punkte = Rohwerte, Linie = 7-Tage-Trend, gestrichelt = Ziel,
   // optionale Meilenstein-Marker [{ threshold, key, trend }] an den Trend-Punkten.
   // points: [{ key, weight, trend }] aufsteigend, target: Zielgewicht oder null.
-  function weightChart(points, target, marks) {
+  function weightChart(points, target, marks, opts) {
+    const label = (opts && opts.label) || 'Gewichtsverlauf';
+    const emptyText = (opts && opts.emptyText) || 'Noch keine Wiegeeinträge';
     const w = 340, h = 190, padL = 38, padR = 10, padT = 12, padB = 24;
     if (points.length === 0) {
       return `<svg viewBox="0 0 ${w} ${h}" class="chart">
-        <text x="${w / 2}" y="${h / 2}" text-anchor="middle" class="chart-empty">Noch keine Wiegeeinträge</text>
+        <text x="${w / 2}" y="${h / 2}" text-anchor="middle" class="chart-empty">${emptyText}</text>
       </svg>`;
     }
     const values = points.map(p => p.weight).concat(points.map(p => p.trend));
@@ -67,7 +69,7 @@ const Charts = (() => {
     const x = key => padL + (dateMs(key) - t0) / span * (w - padL - padR);
     const y = v => padT + (max - v) / (max - min) * (h - padT - padB);
 
-    let svg = `<svg viewBox="0 0 ${w} ${h}" class="chart" role="img" aria-label="Gewichtsverlauf">`;
+    let svg = `<svg viewBox="0 0 ${w} ${h}" class="chart" role="img" aria-label="${label}">`;
 
     // Y-Achse: 3 Hilfslinien
     for (let i = 0; i <= 2; i++) {

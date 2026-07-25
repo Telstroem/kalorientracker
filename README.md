@@ -8,9 +8,11 @@ Safari öffnen → Teilen → „Zum Home-Bildschirm", dann startet die App im V
 
 ## Was die App kann
 
-- **Heute:** Kalorienring, Tagesdefizit, Makros (Proteinziel prominent), vier
-  Mahlzeiten mit Einträgen aus Datenbank (~130 deutsche Lebensmittel), Favoriten,
-  Schnelleingabe — auch für vergangene Tage.
+- **Heute:** Kalorienring, Tagesdefizit, Makros (Proteinziel prominent) inklusive
+  **Ballaststoffen** (Ziel 30 g/Tag nach DGE; fehlen bei einzelnen Einträgen die
+  Angaben, zeigt der Balken ehrlich „≥ X g“ und wie viele Einträge ohne Angabe
+  sind), vier Mahlzeiten mit Einträgen aus Datenbank (147 deutsche Lebensmittel,
+  jeweils mit Ballaststoffwert), Favoriten, Schnelleingabe — auch für vergangene Tage.
 - **KI-Erkennung (optional):** Mahlzeit fotografieren oder als Freitext beschreiben,
   Claude schätzt die Nährwerte; zweiter Modus **„Etikett“** liest die
   Nährwerttabelle einer Packung exakt ab (pro 100 g und pro Portion). Wird erst
@@ -23,13 +25,32 @@ Safari öffnen → Teilen → „Zum Home-Bildschirm", dann startet die App im V
 - **Gewicht:** Schnelleingabe (auch nachtragen), Diagramm mit 7-Tage-Trend,
   Ziellinie und Meilensteinen, Prognose fürs Zielgewicht; optionale
   **Verbrauchs-Kalibrierung** aus dem eigenen Ess- und Wiegeprotokoll
-  (gedämpft und begrenzt, in den Einstellungen umschaltbar).
+  (gedämpft und begrenzt, in den Einstellungen umschaltbar). Die Kalibrierung
+  schätzt die Trendsteigung über alle Punkte des Fensters (Least Squares, damit
+  ein einzelner Wassertag am Rand nichts verzerrt), verlangt mindestens 75 %
+  erfasste Tage und weist Unsicherheit und Abdeckung offen aus
+  („≈ 2.450 kcal (± 130) · 24 von 28 Tagen erfasst“).
+- **Bauchumfang & BMI:** optionales zweites Maß im Gewicht-Tab (mit eigenem
+  Verlaufsdiagramm), dazu Kacheln für Δ seit Start, **WHtR** (Taille/Größe,
+  Richtwert < 0,50) und **BMI** mit neutraler Einordnung. Reine Anzeige — ohne
+  Einfluss auf Kalorienziel oder Prognose, keine medizinische Bewertung.
+- **Aktivkalorien der Apple Watch (optional, Standard aus):** Werte lassen sich
+  einzeln im Heute-Tab oder gesammelt in den Einstellungen eintragen
+  („25.07. 640“, „25.07.2026 640“, „2026-07-25;640“; vor dem Übernehmen zeigt
+  eine Vorschau erkannte, doppelte und unklare Zeilen). Angerechnet wird nur die
+  **Abweichung vom eigenen Durchschnitt**, zur Hälfte und höchstens ±400 kcal,
+  erst ab 7 erfassten Tagen — die mittlere Aktivität steckt schon im
+  Aktivitätslevel bzw. in der Kalibrierung und würde sonst doppelt zählen. Die
+  Kalibrierung selbst bleibt davon unberührt.
 - **Verlauf:** Kalorien der letzten 14 Tage, Ø-Werte, kumuliertes Defizit
   (umgerechnet in kg Fett), Wochenübersicht (Ø kcal, Ø Protein,
   Zieleinhaltung, Gewichtsveränderung).
 - **Einstellungen:** Körperdaten und Ziele (BMR/TDEE nach Mifflin-St-Jeor),
   Farbschema, Export/Import als JSON, **CSV-Export** der Tageswerte für Excel
-  (Semikolon-getrennt, deutsches Zahlenformat). Hinweis: Bei aktiver
+  (Semikolon-getrennt, deutsches Zahlenformat; Spalten `Datum`, `kcal`,
+  `Protein_g`, `Fett_g`, `KH_g`, `Ballaststoffe_g`, `TDEE`, `Defizit`, `Gewicht`,
+  `Bauchumfang_cm`, `Aktivkalorien` — `Ballaststoffe_g` ist die Summe der
+  bekannten Angaben eines Tages). Hinweis: Bei aktiver
   Verbrauchs-Kalibrierung enthalten die Spalten TDEE/Defizit für alle Tage
   den aktuell kalibrierten Verbrauch (eine rückwirkende Tages-Historie der
   Kalibrierung gibt es bewusst nicht).

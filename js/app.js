@@ -8,6 +8,7 @@
   const NF0 = new Intl.NumberFormat('de-DE', { maximumFractionDigits: 0 });
   const NF1 = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
   const NFx = new Intl.NumberFormat('de-DE', { maximumFractionDigits: 1 });
+  const NF2 = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const esc = s => String(s).replace(/[&<>"']/g, c => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
@@ -52,6 +53,8 @@
   let weightDate = todayKey();
   let sheet = null;   // { meal, tab, query, food, editing, ai: {...} }
   let ob = null;      // Onboarding: { step, values }
+  let activeEdit = false;             // Inline-Feld für Aktivkalorien im Heute-Tab
+  let watchImport = { text: '', result: null }; // Sammel-Import Aktivkalorien
 
   const MEALS = [
     { id: 'breakfast', label: 'Frühstück' },
@@ -82,11 +85,15 @@
     MEALS.forEach(m => { if (!data.days[key].meals[m.id]) data.days[key].meals[m.id] = []; });
     return data.days[key];
   }
+  // fib summiert nur bekannte Angaben; fibUnknown zählt Einträge ohne Angabe
+  // (undefined = unbekannt, 0 = bewusst null – der Unterschied trägt die Anzeige).
   function dayTotals(key) {
     const day = getDay(key);
-    const t = { kcal: 0, p: 0, f: 0, kh: 0 };
+    const t = { kcal: 0, p: 0, f: 0, kh: 0, fib: 0, fibUnknown: 0 };
     MEALS.forEach(m => (day.meals[m.id] || []).forEach(e => {
       t.kcal += e.kcal; t.p += e.p || 0; t.f += e.f || 0; t.kh += e.kh || 0;
+      if (typeof e.fib === 'number' && isFinite(e.fib)) t.fib += e.fib;
+      else t.fibUnknown++;
     }));
     return t;
   }
@@ -100,6 +107,10 @@
 
   function weightEntries() {
     return Object.keys(data.weights).sort().map(key => ({ key, weight: data.weights[key] }));
+  }
+  // Bauchumfang in derselben Struktur wie Gewichte, damit Trend und Chart wiederverwendbar sind.
+  function waistEntries() {
+    return Object.keys(data.waist || {}).sort().map(key => ({ key, weight: data.waist[key] }));
   }
   function weightOnOrBefore(key) {
     const entries = weightEntries();
@@ -117,7 +128,8 @@
 
   // Zentrale Kennzahlen. Bei aktiver Kalibrierung gilt der gedämpfte, einmal
   // täglich fortgeschriebene effektive TDEE (settings.appliedTdee) einheitlich
-  // für Ziel, Defizit, Ring und Prognose.
+  // für Ziel, Defizit, Ring und Prognose. Der Aktivkalorien-Zuschlag der Watch
+  // kommt danach obendrauf und lässt die Kalibrierung selbst unberührt.
   function metricsFor(key) {
     const p = data.profile;
     const weight = weightOnOrBefore(key) ?? currentWeight();
@@ -125,14 +137,28 @@
     const bmr = Calc.bmr(p.sex, weight, p.heightCm, age);
     const formulaTdee = Calc.tdee(bmr, p.activity);
     const s = data.settings;
-    const tdee = (s.useCalibratedTdee && typeof s.appliedTdee === 'number' && isFinite(s.appliedTdee))
+    const baseTdee = (s.useCalibratedTdee && typeof s.appliedTdee === 'number' && isFinite(s.appliedTdee))
       ? s.appliedTdee
       : formulaTdee;
+    const activityAdj = activityAdjustmentFor(key);
+    const tdee = Math.max(1, baseTdee + activityAdj);
     return {
-      weight, bmr, formulaTdee, tdee,
+      weight, bmr, formulaTdee, baseTdee, activityAdj, tdee,
       goal: Calc.calorieGoal(tdee, p.deficit),
       proteinGoal: Calc.proteinGoal(weight, p.proteinPerKg)
     };
+  }
+
+  function activeEnergyStats() {
+    return Calc.activeEnergyStats(data.activeEnergy, todayKey());
+  }
+
+  function activityAdjustmentFor(key) {
+    if (!data.settings.useActiveEnergy) return 0;
+    const value = (data.activeEnergy || {})[key];
+    if (typeof value !== 'number' || !isFinite(value)) return 0;
+    const stats = activeEnergyStats();
+    return Calc.activityAdjustment(value, stats.avg, stats.count);
   }
 
   // ---------- Verbrauchs-Kalibrierung ----------
@@ -142,11 +168,12 @@
   }
 
   function computeCalibration() {
-    const trend = Calc.weightTrend(weightEntries());
+    const raw = weightEntries();
+    const trend = Calc.weightTrend(raw);
     const intakes = trackedKeys()
       .filter(k => k <= todayKey())
       .map(k => ({ key: k, kcal: dayTotals(k).kcal }));
-    return Calc.calibratedTdee(trend, intakes, todayKey());
+    return Calc.calibratedTdee(trend, intakes, todayKey(), raw);
   }
 
   function formulaTdeeToday() {
@@ -184,15 +211,29 @@
   }
   function itemKey(item) { return `${item.name}|${item.amount}`; }
 
+  // Ballaststoffe: gültige Zahl → auf 1 Dezimale gerundet, sonst undefined (= unbekannt).
+  function fibValue(raw) {
+    if (typeof raw === 'number' && isFinite(raw) && raw >= 0) return Math.round(raw * 10) / 10;
+    return undefined;
+  }
+  function withFib(target, raw) {
+    const v = fibValue(raw);
+    if (v !== undefined) target.fib = v;
+    return target;
+  }
+
   function pushRecent(entry) {
-    const item = { name: entry.name, amount: entry.amount, kcal: entry.kcal, p: entry.p, f: entry.f, kh: entry.kh };
+    const item = withFib(
+      { name: entry.name, amount: entry.amount, kcal: entry.kcal, p: entry.p, f: entry.f, kh: entry.kh },
+      entry.fib
+    );
     data.recents = data.recents.filter(r => itemKey(r) !== itemKey(item));
     data.recents.unshift(item);
     data.recents = data.recents.slice(0, 50);
   }
 
   function addEntry(dayKey, mealId, values) {
-    const entry = {
+    const entry = withFib({
       id: newId(),
       name: values.name,
       amount: values.amount || '',
@@ -200,7 +241,7 @@
       p: Math.round((values.p || 0) * 10) / 10,
       f: Math.round((values.f || 0) * 10) / 10,
       kh: Math.round((values.kh || 0) * 10) / 10
-    };
+    }, values.fib);
     ensureDay(dayKey).meals[mealId].push(entry);
     pushRecent(entry);
     persist();
@@ -222,7 +263,10 @@
     const k = itemKey(item);
     const idx = data.favorites.findIndex(f => itemKey(f) === k);
     if (idx >= 0) data.favorites.splice(idx, 1);
-    else data.favorites.unshift({ name: item.name, amount: item.amount, kcal: item.kcal, p: item.p, f: item.f, kh: item.kh });
+    else data.favorites.unshift(withFib(
+      { name: item.name, amount: item.amount, kcal: item.kcal, p: item.p, f: item.f, kh: item.kh },
+      item.fib
+    ));
     persist();
   }
   function isFavorite(item) {
@@ -309,16 +353,23 @@
       <div class="card ring-card">
         ${Charts.ring(totals.kcal, m.goal, m.tdee)}
         <div class="stat-row">
-          <div class="stat"><div class="stat-value">${fmtKcal(m.tdee)}</div><div class="stat-label">Verbrauch</div></div>
+          <div class="stat"><div class="stat-value">${fmtKcal(m.tdee)}</div><div class="stat-label">Verbrauch${m.activityAdj !== 0 ? ` (${m.activityAdj > 0 ? '+' : '−'}${fmtKcal(Math.abs(m.activityAdj))} Aktivität)` : ''}</div></div>
           <div class="stat"><div class="stat-value">${fmtKcal(totals.kcal)}</div><div class="stat-label">Gegessen</div></div>
           <div class="stat stat-accent"><div class="stat-value ${deficit < 0 ? 'neg' : ''}">${deficit < 0 ? '+' + fmtKcal(-deficit) : fmtKcal(deficit)}</div><div class="stat-label">${deficit < 0 ? 'Überschuss' : 'Defizit'}</div></div>
         </div>
+        ${activeEnergyRow()}
       </div>
 
       <div class="card">
         ${macroBar('Protein', totals.p, m.proteinGoal, true)}
         ${macroBar('Fett', totals.f, fatRef, false)}
         ${macroBar('Kohlenhydrate', totals.kh, khRef, false)}
+        ${macroBar('Ballaststoffe', totals.fib, Calc.FIBER_GOAL_G, true, {
+          atLeast: totals.fibUnknown > 0,
+          note: totals.fibUnknown > 0
+            ? `${NF0.format(totals.fibUnknown)} ${totals.fibUnknown === 1 ? 'Eintrag' : 'Einträge'} ohne Angabe`
+            : ''
+        })}
       </div>
       </div>
       <div class="today-col">`;
@@ -355,17 +406,39 @@
     $('#view-today').innerHTML = html;
   }
 
-  function macroBar(label, value, goal, showGoal) {
+  function macroBar(label, value, goal, showGoal, opts) {
+    const o = opts || {};
     const pct = Math.min(value / Math.max(goal, 1) * 100, 100);
     const over = value > goal;
     return `
       <div class="macro ${showGoal ? 'macro-protein' : ''}">
         <div class="macro-head">
           <span class="macro-label">${label}</span>
-          <span class="macro-values">${fmtG(value)}${showGoal ? ` / ${fmtG(goal)}` : ''} g</span>
+          <span class="macro-values">${o.atLeast ? '≥ ' : ''}${fmtG(value)}${showGoal ? ` / ${fmtG(goal)}` : ''} g</span>
         </div>
         <div class="macro-track"><div class="macro-fill ${over && showGoal ? 'done' : ''}" style="width:${pct.toFixed(1)}%"></div></div>
+        ${o.note ? `<div class="macro-note">${esc(o.note)}</div>` : ''}
       </div>`;
+  }
+
+  // Dezente Zeile unter dem Ring: Aktivkalorien des angezeigten Tages, Tap öffnet ein Inline-Feld.
+  function activeEnergyRow() {
+    if (!data.settings.useActiveEnergy) return '';
+    const value = (data.activeEnergy || {})[currentDay];
+    if (activeEdit) {
+      return `
+        <div class="active-row">
+          <span class="active-label">Aktivkalorien</span>
+          <input type="text" inputmode="numeric" id="active-input" placeholder="z. B. 640"
+            value="${value != null ? esc(NF0.format(value)) : ''}">
+          <button class="btn primary" data-action="save-active">OK</button>
+        </div>`;
+    }
+    return `
+      <button class="active-row tap" data-action="edit-active">
+        <span class="active-label">Aktivkalorien (Watch)</span>
+        <span class="active-value">${value != null ? `${fmtKcal(value)} kcal` : '–'}</span>
+      </button>`;
   }
 
   // ---------- Rendering: Gewicht ----------
@@ -394,8 +467,10 @@
     if (data.settings.useCalibratedTdee) {
       calTile = `
         <div class="card tile wide">
-          <div class="tile-value">${fmtKcal(mToday.tdee)} kcal</div>
-          <div class="tile-label">Verbrauchsbasis: automatisch kalibriert (Formel: ${fmtKcal(mToday.formulaTdee)} kcal)${cal ? ` · ${NF0.format(cal.days)} Tage Beobachtung` : ' · Datenlage aktuell dünn, Wert bleibt stabil'} – umstellbar in den Einstellungen</div>
+          <div class="tile-value">${fmtKcal(mToday.baseTdee)} kcal${cal ? calBandLabel(cal) : ''}</div>
+          <div class="tile-label">Verbrauchsbasis: automatisch kalibriert (Formel: ${fmtKcal(mToday.formulaTdee)} kcal)${cal ? ` · ${calCoverageLabel(cal)}` : ' · Datenlage aktuell dünn, Wert bleibt stabil'} – umstellbar in den Einstellungen</div>
+          ${cal ? `<div class="tile-label">${esc(calExplainText())}</div>` : ''}
+          ${watchCrossCheck(cal)}
         </div>`;
     } else if (cal) {
       const higher = cal.tdee > mToday.formulaTdee + 25;
@@ -405,11 +480,52 @@
         : (lower ? 'Dein realer Verbrauch liegt etwas unter der Formel.' : 'Beobachtung und Formel stimmen gut überein.');
       calTile = `
         <div class="card tile wide">
-          <div class="tile-value">Realer Verbrauch ≈ ${fmtKcal(cal.tdee)} kcal</div>
-          <div class="tile-label">${note} Formel: ${fmtKcal(mToday.formulaTdee)} kcal · Basis: ${NF0.format(cal.days)} getrackte Tage. Übernahme wirkt gedämpft und begrenzt aufs Tagesziel.</div>
+          <div class="tile-value">Realer Verbrauch ≈ ${fmtKcal(cal.tdee)} kcal${calBandLabel(cal)}</div>
+          <div class="tile-label">${note} Formel: ${fmtKcal(mToday.formulaTdee)} kcal · ${calCoverageLabel(cal)}. Übernahme wirkt gedämpft und begrenzt aufs Tagesziel.</div>
+          <div class="tile-label">${esc(calExplainText())}</div>
+          ${watchCrossCheck(cal)}
           <button class="btn primary cal-btn" data-action="use-calibrated">Als Basis übernehmen</button>
         </div>`;
     }
+
+    const waist = waistEntries();
+    const waistTrend = Calc.weightTrend(waist);
+    const waistNow = waist.length ? waist[waist.length - 1].weight : null;
+    const waistStart = waist.length ? waist[0].weight : null;
+    const bmiValue = Calc.bmi(latestTrend !== null ? latestTrend : currentWeight(), p.heightCm);
+    const whtrValue = Calc.whtr(waistNow, p.heightCm);
+    const dateWaist = (data.waist || {})[weightDate];
+
+    const waistCard = waist.length ? `
+      <div class="card">
+        <div class="card-title">Bauchumfang</div>
+        ${Charts.weightChart(waistTrend.filter(t => t.key >= cutoff), null, null,
+          { label: 'Bauchumfang-Verlauf', emptyText: 'Keine Messung im gewählten Zeitraum' })}
+        <div class="legend">
+          <span><i class="dot-accent"></i> 7-Tage-Trend</span>
+          <span><i class="dot-raw"></i> Messwerte (cm)</span>
+        </div>
+      </div>` : '';
+
+    const bodyTiles = `
+      <div class="tile-grid">
+        <div class="card tile">
+          <div class="tile-value">${waistNow !== null ? `${NFx.format(waistNow)} cm` : '–'}</div>
+          <div class="tile-label">${waistNow !== null && waistStart !== null && waist.length > 1
+            ? `Bauchumfang · ${signedCm(waistNow - waistStart)} seit Start`
+            : 'Bauchumfang'}</div>
+        </div>
+        <div class="card tile">
+          <div class="tile-value">${whtrValue !== null ? NF2.format(whtrValue) : '–'}</div>
+          <div class="tile-label">${whtrValue !== null
+            ? `Taille/Größe – ${esc(Calc.whtrCategory(whtrValue))} (Richtwert &lt; 0,50)`
+            : 'Taille/Größe – Bauchumfang eintragen'}</div>
+        </div>
+        <div class="card tile wide">
+          <div class="tile-value">${bmiValue !== null ? `BMI ${NFx.format(bmiValue)}` : '–'}</div>
+          <div class="tile-label">${bmiValue !== null ? esc(Calc.bmiCategory(bmiValue)) : 'BMI'} · Orientierungswerte, keine medizinische Bewertung</div>
+        </div>
+      </div>`;
 
     const dateWeight = data.weights[weightDate];
     const dateLabel = weightDate === todayKey() ? 'Heute'
@@ -425,6 +541,12 @@
           <input id="weight-input" type="text" inputmode="decimal" placeholder="z. B. 82,4"
             value="${dateWeight != null ? esc(NF1.format(dateWeight)) : ''}">
           <button class="btn primary" data-action="save-weight">Speichern</button>
+        </div>
+        <label class="field-label waist-label" for="waist-input">Bauchumfang (cm) – optional</label>
+        <div class="inline-form">
+          <input id="waist-input" type="text" inputmode="decimal" placeholder="z. B. 96,5"
+            value="${dateWaist != null ? esc(NFx.format(dateWaist)) : ''}">
+          <button class="btn" data-action="save-waist">Speichern</button>
         </div>
         <div class="weight-date">für
           <label class="date-tap">${esc(dateLabel)}
@@ -471,7 +593,9 @@
         </div>
         ${calTile}
       </div>
-      ${!fc ? `<p class="hint">Für eine Prognose braucht es mindestens 5 getrackte Tage mit einem durchschnittlichen Kaloriendefizit und einen Trend oberhalb des Zielgewichts.</p>` : ''}`;
+      ${!fc ? `<p class="hint">Für eine Prognose braucht es mindestens 5 getrackte Tage mit einem durchschnittlichen Kaloriendefizit und einen Trend oberhalb des Zielgewichts.</p>` : ''}
+      ${waistCard}
+      ${bodyTiles}`;
 
     $('#view-weight').innerHTML = html;
 
@@ -489,6 +613,38 @@
     if (r > 0) return `+${fmtKg(r)} kg`;
     if (r < 0) return `−${fmtKg(Math.abs(r))} kg`;
     return `±0,0 kg`;
+  }
+
+  function signedCm(diff) {
+    const r = Math.round(diff * 10) / 10;
+    if (r > 0) return `+${NFx.format(r)} cm`;
+    if (r < 0) return `−${NFx.format(Math.abs(r))} cm`;
+    return '±0 cm';
+  }
+
+  // „(± 130)“ – Unsicherheitsband aus der Streuung der Trendpunkte.
+  function calBandLabel(cal) {
+    return cal && cal.uncertainty ? ` (± ${fmtKcal(cal.uncertainty)})` : '';
+  }
+
+  function calCoverageLabel(cal) {
+    if (!cal || !cal.windowDays) return `${NF0.format(cal ? cal.days : 0)} getrackte Tage`;
+    return `${NF0.format(cal.trackedInSpan)} von ${NF0.format(cal.windowDays)} Tagen erfasst`;
+  }
+
+  function calExplainText() {
+    return 'Der Wert hängt an deiner Erfassungsweise: Wer Portionen großzügig schätzt, hebt ihn mit an. ' +
+      'Fürs Tagesziel bleibt er trotzdem stimmig, weil Aufnahme und Verbrauch in denselben Einheiten rechnen – ' +
+      'zum Vergleich mit fremden Rechnern taugt er nicht.';
+  }
+
+  // Gegenprobe mit der Watch: Ruheumsatz (Formel) + Ø Aktivkalorien gegen den beobachteten Verbrauch.
+  function watchCrossCheck(cal) {
+    if (!cal || !data.settings.useActiveEnergy) return '';
+    const stats = activeEnergyStats();
+    if (stats.avg === null || stats.count < 7) return '';
+    const watchTotal = Math.round(metricsFor(todayKey()).bmr + stats.avg);
+    return `<div class="tile-label">Watch Ø ${fmtKcal(watchTotal)} (Ruhe + Aktiv) · beobachtet ${fmtKcal(cal.tdee)} kcal</div>`;
   }
 
   // ---------- Rendering: Verlauf ----------
@@ -629,12 +785,7 @@
             <input type="text" inputmode="decimal" data-setting="proteinPerKg" value="${esc(String(p.proteinPerKg).replace('.', ','))}">
           </label>
         </div>
-        <div class="calc-preview">
-          <div><span>Grundumsatz (BMR)</span><strong>${fmtKcal(m.bmr)} kcal</strong></div>
-          <div><span>Gesamtumsatz (TDEE)${data.settings.useCalibratedTdee ? ' – kalibriert' : ''}</span><strong>${fmtKcal(m.tdee)} kcal</strong></div>
-          <div><span>Kalorienziel</span><strong>${fmtKcal(m.goal)} kcal</strong></div>
-          <div><span>Proteinziel</span><strong>${fmtG(m.proteinGoal)} g</strong></div>
-        </div>
+        <div class="calc-preview" id="settings-calc">${calcPreviewRows(m)}</div>
       </div>
 
       <div class="card">
@@ -645,7 +796,28 @@
             <option value="calibrated" ${data.settings.useCalibratedTdee ? 'selected' : ''}>Automatisch kalibriert</option>
           </select>
         </label>
-        <p class="hint">${tdeeBasisStatus()}</p>
+        <p class="hint" id="tdee-status">${tdeeBasisStatus()}</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Aktivkalorien (Apple Watch)</div>
+        <label class="row-label">Tagesziel mit Aktivkalorien anpassen
+          <input type="checkbox" data-setting="useActiveEnergy" ${data.settings.useActiveEnergy ? 'checked' : ''}>
+        </label>
+        <p class="hint" id="watch-status">${activeEnergyStatus()}</p>
+        <label class="field-label" for="watch-import" style="margin-top:10px">Werte sammeln eintragen (eine Zeile je Tag)</label>
+        <textarea id="watch-import" rows="4" placeholder="25.07. 640&#10;24.07.2026 512&#10;2026-07-23;705">${esc(watchImport.text)}</textarea>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn" data-action="watch-check">Prüfen</button>
+          <button class="btn primary" data-action="watch-apply" ${watchImport.result && watchImport.result.entries.length ? '' : 'disabled'}>Übernehmen</button>
+        </div>
+        <p class="hint" id="watch-preview">${esc(watchImportPreview())}</p>
+        <p class="hint">Gemeint sind die <strong>Aktiv</strong>kalorien (Bewegung), nicht die Gesamtkalorien.
+        Angerechnet wird nur die Abweichung vom eigenen Durchschnitt, zur Hälfte und höchstens
+        ±400 kcal – die mittlere Aktivität steckt bereits im Aktivitätslevel bzw. in der
+        Kalibrierung und würde sonst doppelt zählen. Der Energieverbrauch am Handgelenk ist
+        die schwächste Messgröße der Uhr (oft 20–30 % Abweichung pro Tag); die Werte
+        modulieren das Tagesziel, sie ersetzen die Verbrauchsbasis nicht.</p>
       </div>
 
       <div class="card">
@@ -686,8 +858,9 @@
         <div class="btn-row" style="margin-top:10px">
           <button class="btn" data-action="export-csv">Tage als CSV exportieren</button>
         </div>
-        <p class="hint">${lastExportLabel()} Die CSV enthält je getracktem Tag kcal, Makros,
-        Verbrauch, Defizit und Gewicht (Semikolon-getrennt, für Excel).</p>
+        <p class="hint" id="export-status">${lastExportLabel()} Die CSV enthält je getracktem Tag kcal,
+        Makros inkl. Ballaststoffen, Verbrauch, Defizit, Gewicht, Bauchumfang und Aktivkalorien
+        (Semikolon-getrennt, für Excel).</p>
       </div>
 
       <div class="card">
@@ -695,13 +868,79 @@
         <button class="btn danger" data-action="delete-all">Alle Daten löschen</button>
       </div>
 
-      <p class="hint center">Kalorientracker · Version 1.4 · Daten bleiben auf dem Gerät</p>`;
+      <p class="hint center">Kalorientracker · Version 1.5 · Daten bleiben auf dem Gerät</p>`;
 
     $('#view-settings').innerHTML = html;
 
     document.querySelectorAll('#view-settings [data-setting]').forEach(el => {
       el.addEventListener('change', onSettingChange);
     });
+    const watchBox = $('#watch-import');
+    if (watchBox) {
+      watchBox.addEventListener('input', () => {
+        watchImport.text = watchBox.value;
+        watchImport.result = null; // geänderter Text → erst wieder prüfen, dann übernehmen
+        refreshSettingsDerived();
+      });
+    }
+  }
+
+  function calcPreviewRows(m) {
+    return `
+      <div><span>Grundumsatz (BMR)</span><strong>${fmtKcal(m.bmr)} kcal</strong></div>
+      <div><span>Gesamtumsatz (TDEE)${data.settings.useCalibratedTdee ? ' – kalibriert' : ''}</span><strong>${fmtKcal(m.tdee)} kcal</strong></div>
+      <div><span>Kalorienziel</span><strong>${fmtKcal(m.goal)} kcal</strong></div>
+      <div><span>Proteinziel</span><strong>${fmtG(m.proteinGoal)} g</strong></div>`;
+  }
+
+  // Aktualisiert nur die abgeleiteten Anzeigen der Einstellungen – der Rest der View
+  // (und damit Fokus und Scrollposition, auch bei offener Tastatur) bleibt stehen.
+  function refreshSettingsDerived() {
+    const calcBox = $('#settings-calc');
+    if (calcBox) calcBox.innerHTML = calcPreviewRows(metricsFor(todayKey()));
+    const tdeeBox = $('#tdee-status');
+    if (tdeeBox) tdeeBox.textContent = tdeeBasisStatus();
+    const watchBox = $('#watch-status');
+    if (watchBox) watchBox.textContent = activeEnergyStatus();
+    const previewBox = $('#watch-preview');
+    if (previewBox) previewBox.textContent = watchImportPreview();
+    const applyBtn = document.querySelector('[data-action="watch-apply"]');
+    if (applyBtn) applyBtn.disabled = !(watchImport.result && watchImport.result.entries.length);
+    const exportBox = $('#export-status');
+    if (exportBox) {
+      exportBox.textContent = `${lastExportLabel()} Die CSV enthält je getracktem Tag kcal, ` +
+        'Makros inkl. Ballaststoffen, Verbrauch, Defizit, Gewicht, Bauchumfang und Aktivkalorien ' +
+        '(Semikolon-getrennt, für Excel).';
+    }
+  }
+
+  function activeEnergyStatus() {
+    const stats = activeEnergyStats();
+    const days = Object.keys(data.activeEnergy || {}).length;
+    if (days === 0) return 'Noch keine Aktivkalorien erfasst. Der Zuschlag greift ab 7 erfassten Tagen.';
+    if (stats.count < 7) {
+      return `${NF0.format(days)} ${days === 1 ? 'Tag' : 'Tage'} erfasst – der Zuschlag greift ab 7 Tagen.`;
+    }
+    const todayValue = (data.activeEnergy || {})[todayKey()];
+    const adj = activityAdjustmentFor(todayKey());
+    const base = `Ø ${fmtKcal(stats.avg)} kcal aus ${NF0.format(stats.count)} Tagen (${NF0.format(days)} insgesamt erfasst).`;
+    if (!data.settings.useActiveEnergy) return `${base} Zuschlag ist ausgeschaltet.`;
+    if (todayValue == null) return `${base} Für heute liegt noch kein Wert vor.`;
+    return `${base} Heute ${fmtKcal(todayValue)} kcal → Zuschlag ${adj >= 0 ? '+' : '−'}${fmtKcal(Math.abs(adj))} kcal.`;
+  }
+
+  function watchImportPreview() {
+    const r = watchImport.result;
+    if (!r) return 'Formate: „25.07. 640“, „25.07.2026 640“ oder „2026-07-25;640“.';
+    const parts = [`${NF0.format(r.entries.length)} ${r.entries.length === 1 ? 'Tag' : 'Tage'} erkannt`];
+    if (r.duplicates > 0) parts.push(`${NF0.format(r.duplicates)} doppelte ${r.duplicates === 1 ? 'Zeile' : 'Zeilen'} (jeweils der letzte Wert zählt)`);
+    if (r.unclear.length > 0) {
+      const shown = r.unclear.slice(0, 5).map(line => line.slice(0, 40));
+      const rest = r.unclear.length - shown.length;
+      parts.push(`${NF0.format(r.unclear.length)} ${r.unclear.length === 1 ? 'Zeile' : 'Zeilen'} unklar: ` +
+        shown.join(' | ') + (rest > 0 ? ` … (+${NF0.format(rest)})` : ''));
+    }
+    return parts.join(' · ') + '.';
   }
 
   function tdeeBasisStatus() {
@@ -709,14 +948,37 @@
     const cal = computeCalibration();
     if (s.useCalibratedTdee) {
       const m = metricsFor(todayKey());
-      return `Aktiv: effektiver Verbrauch heute ${fmtKcal(m.tdee)} kcal (Formel: ${fmtKcal(m.formulaTdee)} kcal). ` +
+      const detail = cal ? ` Beobachtung: ≈ ${fmtKcal(cal.tdee)} kcal${calBandLabel(cal)} · ${calCoverageLabel(cal)}.` : '';
+      return `Aktiv: Verbrauchsbasis heute ${fmtKcal(m.baseTdee)} kcal (Formel: ${fmtKcal(m.formulaTdee)} kcal).${detail} ` +
         'Der Wert folgt der Beobachtung gedämpft (max. 50 kcal Änderung pro Tag, ±25 % um die Formel).';
     }
     if (cal) {
-      return `Beobachtung verfügbar: realer Verbrauch ≈ ${fmtKcal(cal.tdee)} kcal aus ${NF0.format(cal.days)} getrackten Tagen. ` +
+      return `Beobachtung verfügbar: realer Verbrauch ≈ ${fmtKcal(cal.tdee)} kcal${calBandLabel(cal)} · ${calCoverageLabel(cal)}. ` +
         'Umschalten übernimmt ihn gedämpft als Basis für Ziel und Defizit.';
     }
-    return 'Noch zu wenig Daten für eine Kalibrierung (mindestens 14 getrackte Tage und regelmäßige Wiegungen innerhalb von 28 Tagen).';
+    return calibrationReasonText();
+  }
+
+  // Erklärt, woran die Kalibrierung gerade scheitert (statt pauschal „zu wenig Daten“).
+  function calibrationReasonText() {
+    const win = Calc.calibrationWindow(
+      Calc.weightTrend(weightEntries()),
+      trackedKeys().filter(k => k <= todayKey()).map(k => ({ key: k, kcal: dayTotals(k).kcal })),
+      todayKey()
+    );
+    switch (win.reason) {
+      case 'few-days':
+        return `Noch zu wenig Daten: ${NF0.format(win.trackedDays)} von mindestens 14 getrackten Tagen innerhalb der letzten 28 Tage.`;
+      case 'few-weighings':
+        return 'Für eine Kalibrierung fehlen Wiegungen – nötig sind mindestens zwei pro Woche innerhalb der letzten 28 Tage.';
+      case 'short-span':
+        return 'Die Wiegungen liegen zeitlich zu dicht beieinander (nötig sind mindestens 10 Tage zwischen erster und letzter Wiegung).';
+      case 'coverage':
+        return `Zu viele Lückentage: nur ${NF0.format(win.trackedInSpan)} von ${NF0.format(win.windowDays)} Tagen erfasst ` +
+          '(mindestens 75 % nötig, sonst verzerren die nicht getrackten Tage das Ergebnis).';
+      default:
+        return 'Noch zu wenig Daten für eine Kalibrierung (mindestens 14 getrackte Tage und regelmäßige Wiegungen innerhalb von 28 Tagen).';
+    }
   }
 
   function lastExportLabel() {
@@ -733,24 +995,29 @@
     persist();
   }
 
-  // CSV: Datum;kcal;Protein_g;Fett_g;KH_g;TDEE;Defizit;Gewicht — Semikolon, Komma-Dezimal.
+  // CSV: Semikolon, Komma-Dezimal. Ballaststoffe = Summe der bekannten Angaben.
   function buildCsv() {
     const de1 = n => String(Math.round(n * 10) / 10).replace('.', ',');
-    const lines = ['Datum;kcal;Protein_g;Fett_g;KH_g;TDEE;Defizit;Gewicht'];
+    const lines = ['Datum;kcal;Protein_g;Fett_g;KH_g;Ballaststoffe_g;TDEE;Defizit;Gewicht;Bauchumfang_cm;Aktivkalorien'];
     trackedKeys().filter(k => k <= todayKey()).forEach(k => {
       const tot = dayTotals(k);
       const m = metricsFor(k);
       const [y, mo, d] = k.split('-');
       const weight = data.weights[k];
+      const waist = (data.waist || {})[k];
+      const active = (data.activeEnergy || {})[k];
       lines.push([
         `${d}.${mo}.${y}`,
         String(Math.round(tot.kcal)),
         de1(tot.p),
         de1(tot.f),
         de1(tot.kh),
+        de1(tot.fib),
         String(m.tdee),
         String(Math.round(m.tdee - tot.kcal)),
-        weight != null ? de1(weight) : ''
+        weight != null ? de1(weight) : '',
+        waist != null ? de1(waist) : '',
+        active != null ? String(Math.round(active)) : ''
       ].join(';'));
     });
     return lines.join('\r\n') + '\r\n';
@@ -778,12 +1045,17 @@
   }
 
   // Akzeptiert deutsche ("12,5", "1.234,5") und punktdezimale ("12.5") Eingaben,
-  // weist alles andere strikt ab (kein stiller Teil-Parse).
-  function parseGermanFloat(str) {
-    let s = String(str).trim();
-    if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
-    if (!/^\d+(\.\d+)?$/.test(s)) return null;
-    return parseFloat(s);
+  // weist alles andere strikt ab (kein stiller Teil-Parse). Definition in calc.js,
+  // damit Formularparser und Mengen-Umrechner garantiert dieselbe Regel benutzen.
+  const parseGermanFloat = Calc.parseGermanFloat;
+
+  // Weist ein Formularfeld ab: Meldung zeigen und den gespeicherten Wert wieder
+  // eintragen. Nötig, seit die Einstellungen nicht mehr komplett neu gezeichnet
+  // werden – sonst bliebe eine ungültige Eingabe stehen, obwohl die App weiter
+  // mit dem alten Wert rechnet.
+  function rejectSetting(el, value, msg) {
+    el.value = value;
+    toast(msg);
   }
 
   function onSettingChange(e) {
@@ -794,32 +1066,38 @@
       case 'sex': p.sex = el.value === 'f' ? 'f' : 'm'; break;
       case 'birthYear': {
         const v = parseInt(el.value, 10);
-        if (v >= 1920 && v <= 2020) p.birthYear = v; break;
+        if (v >= 1920 && v <= 2020) p.birthYear = v;
+        else rejectSetting(el, String(p.birthYear), 'Bitte ein Geburtsjahr zwischen 1920 und 2020 angeben.');
+        break;
       }
       case 'heightCm': {
         const v = parseInt(el.value, 10);
-        if (v >= 120 && v <= 230) p.heightCm = v; break;
+        if (v >= 120 && v <= 230) p.heightCm = v;
+        else rejectSetting(el, String(p.heightCm), 'Bitte eine Größe zwischen 120 und 230 cm angeben.');
+        break;
       }
       case 'targetWeightKg': {
         const v = parseGermanFloat(el.value);
         if (v !== null && v >= 30 && v <= 300) p.targetWeightKg = Math.round(v * 10) / 10;
+        else rejectSetting(el, NF1.format(p.targetWeightKg), 'Bitte ein Zielgewicht zwischen 30 und 300 kg angeben.');
         break;
       }
       case 'activity': p.activity = Math.min(4, Math.max(0, parseInt(el.value, 10) || 0)); break;
       case 'deficit': p.deficit = parseInt(el.value, 10) || 0; break;
       case 'proteinPerKg': {
         const v = parseGermanFloat(el.value);
-        if (v === null) {
-          toast('Ungültige Eingabe – bitte eine Zahl wie 1,6 angeben.');
-          break;
-        }
-        if (v >= 1 && v <= 2.5) p.proteinPerKg = Math.round(v * 10) / 10;
-        else toast('Proteinziel bitte zwischen 1,0 und 2,5 g/kg wählen.');
+        if (v !== null && v >= 1 && v <= 2.5) p.proteinPerKg = Math.round(v * 10) / 10;
+        else rejectSetting(el, String(p.proteinPerKg).replace('.', ','),
+          v === null ? 'Ungültige Eingabe – bitte eine Zahl wie 1,6 angeben.' : 'Proteinziel bitte zwischen 1,0 und 2,5 g/kg wählen.');
         break;
       }
       case 'theme': data.settings.theme = el.value; break;
       case 'apiKey': data.settings.apiKey = el.value.trim(); break;
       case 'aiWebSearch': data.settings.aiWebSearch = el.checked; break;
+      case 'useActiveEnergy':
+        data.settings.useActiveEnergy = el.checked;
+        toast(el.checked ? 'Aktivkalorien wirken jetzt aufs Tagesziel' : 'Aktivkalorien wirken nicht mehr aufs Tagesziel');
+        break;
       case 'tdeeBasis': {
         const s = data.settings;
         if (el.value === 'calibrated') {
@@ -837,7 +1115,13 @@
       }
     }
     persist();
-    renderAll();
+    // Kein renderAll(): #view-settings darf nicht ersetzt werden, sonst gehen Fokus und
+    // Scrollposition verloren (bei offener Tastatur „verschwindet“ sonst die Ansicht).
+    applyTheme();
+    refreshSettingsDerived();
+    renderToday();
+    renderWeight();
+    renderHistory();
   }
 
   // ---------- Onboarding ----------
@@ -1022,6 +1306,12 @@
   // visualViewport liefert die tatsächlich sichtbare Höhe.
   let sheetViewportCleanup = null;
 
+  function keyboardInset() {
+    const vv = window.visualViewport;
+    if (!vv || !vv.height) return 0;
+    return Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+  }
+
   function attachSheetViewport() {
     const vv = window.visualViewport;
     if (!vv || sheetViewportCleanup) return;
@@ -1033,8 +1323,7 @@
         el.style.maxHeight = '';
         return;
       }
-      const offset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
-      el.style.bottom = offset + 'px';
+      el.style.bottom = keyboardInset() + 'px';
       el.style.maxHeight = Math.round(vv.height * 0.88) + 'px';
     };
     vv.addEventListener('resize', update);
@@ -1048,6 +1337,61 @@
       sheetViewportCleanup = null;
     };
   }
+
+  // ---------- Tastatur-Robustheit ----------
+  // Die iOS-Tastatur verkleinert nur den visualViewport. Wir spiegeln ihre Höhe in
+  // --kb-inset (fürs Scroll-Padding), blenden die Tabbar aus und halten das gerade
+  // fokussierte Feld im sichtbaren Rest – im Sheet UND in den normalen Views.
+
+  let focusedField = null;
+  let focusScrollTimer = null;
+
+  function isFormField(el) {
+    return !!el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && el.type !== 'hidden';
+  }
+
+  function ensureFieldVisible(el) {
+    if (!el || !document.contains(el) || document.activeElement !== el) return;
+    try {
+      el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    } catch (e) {
+      el.scrollIntoView();
+    }
+  }
+
+  function updateKeyboardState() {
+    const inset = keyboardInset();
+    document.documentElement.style.setProperty('--kb-inset', inset + 'px');
+    document.documentElement.classList.toggle('kb-open', inset > 80);
+  }
+
+  function attachViewportTracking() {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const onChange = () => {
+      updateKeyboardState();
+      // Erst im nächsten Frame scrollen: attachSheetViewport() setzt seine Höhe im
+      // selben resize-Ereignis, aber als später registrierter Listener. Ohne den
+      // Aufschub rechnete ensureFieldVisible() mit der alten Sheet-Geometrie.
+      if (focusedField) requestAnimationFrame(() => ensureFieldVisible(focusedField));
+    };
+    vv.addEventListener('resize', onChange);
+    vv.addEventListener('scroll', updateKeyboardState);
+    updateKeyboardState();
+  }
+
+  document.addEventListener('focusin', e => {
+    if (!isFormField(e.target)) return;
+    focusedField = e.target;
+    clearTimeout(focusScrollTimer);
+    focusScrollTimer = setTimeout(() => ensureFieldVisible(focusedField), 150);
+  });
+
+  document.addEventListener('focusout', e => {
+    if (focusedField === e.target) focusedField = null;
+    clearTimeout(focusScrollTimer);
+    setTimeout(updateKeyboardState, 100);
+  });
 
   function showSheet(visible) {
     $('#sheet').classList.toggle('hidden', !visible);
@@ -1184,6 +1528,7 @@
       p: food.p * factor,
       f: food.f * factor,
       kh: food.kh * factor,
+      fib: typeof food.fib === 'number' ? food.fib * factor : undefined,
       label
     };
   }
@@ -1208,18 +1553,14 @@
           <input type="text" inputmode="decimal" id="amount-input" value="${esc(NFx.format(sheet.amount))}">
           <span class="unit">${unitLabel}</span>
         </div>
+        <p class="error-msg amount-error hidden" id="amount-error">Menge nicht erkannt – bitte als Zahl angeben, z. B. „150“.</p>
         <div class="chip-row">
           ${isStk
             ? ['0,5', '1', '2'].map(c => `<button class="chip" data-action="set-amount" data-amount="${c}">${c} Stück</button>`).join('')
             : `${f.portion ? `<button class="chip" data-action="set-amount" data-amount="${f.portion}">${esc(f.portionName || 'Portion')}</button>` : ''}
                <button class="chip" data-action="set-amount" data-amount="100">100 ${unitLabel}</button>`}
         </div>
-        <div class="preview-grid" id="food-preview">
-          <div><strong>${fmtKcal(vals.kcal)}</strong><span>kcal</span></div>
-          <div><strong>${NFx.format(vals.p)} g</strong><span>Protein</span></div>
-          <div><strong>${NFx.format(vals.f)} g</strong><span>Fett</span></div>
-          <div><strong>${NFx.format(vals.kh)} g</strong><span>KH</span></div>
-        </div>
+        <div class="preview-grid" id="food-preview">${foodPreviewRows(vals)}</div>
         <button class="btn primary full" data-action="add-food">Hinzufügen</button>
       </div>`;
   }
@@ -1325,6 +1666,9 @@
         <label>Kohlenhydrate (g)
           <input type="text" inputmode="decimal" id="quick-kh" placeholder="optional">
         </label>
+        <label>Ballaststoffe (g)
+          <input type="text" inputmode="decimal" id="quick-fib" placeholder="optional">
+        </label>
       </div>
       <button class="btn primary full" data-action="add-quick">Hinzufügen</button>`;
   }
@@ -1369,23 +1713,23 @@
       html += '<div class="list-section">Vorschläge – prüfen und anpassen</div><div class="ai-items">';
       ai.items.forEach((it, i) => {
         const sel = it.selected !== false;
-        const qty = parseQtyFromText(it.menge);
         html += `
-        <div class="ai-item ${sel ? '' : 'ai-off'}" data-ai-idx="${i}" data-qty="${qty !== null ? qty : ''}">
+        <div class="ai-item ${sel ? '' : 'ai-off'}" data-ai-idx="${i}" data-qty="${esc(qtySignature(it.menge))}">
           <button type="button" class="ai-toggle ${sel ? 'on' : ''}" data-action="ai-toggle" data-idx="${i}"
             aria-pressed="${sel}" aria-label="Vorschlag ${sel ? 'abwählen' : 'auswählen'}">✓</button>
           <div class="ai-fields">
             <input type="text" class="ai-name" value="${esc(it.name)}" placeholder="Name">
             <div class="ai-menge-row">
               <input type="text" class="ai-menge" value="${esc(it.menge)}" placeholder="Menge">
-              <button type="button" class="chip" data-action="ai-scale" data-factor="0.5">× ½</button>
-              <button type="button" class="chip" data-action="ai-scale" data-factor="2">× 2</button>
+              ${scaleChips('ai-scale')}
             </div>
             <div class="ai-macros">
               <label>kcal<input type="number" class="ai-kcal" inputmode="numeric" value="${it.kcal}"></label>
               <label>P (g)<input type="text" class="ai-p" inputmode="decimal" value="${esc(String(it.p).replace('.', ','))}"></label>
               <label>F (g)<input type="text" class="ai-f" inputmode="decimal" value="${esc(String(it.f).replace('.', ','))}"></label>
               <label>KH (g)<input type="text" class="ai-kh" inputmode="decimal" value="${esc(String(it.kh).replace('.', ','))}"></label>
+              <label>BS (g)<input type="text" class="ai-fib" inputmode="decimal" placeholder="?"
+                value="${it.fib !== undefined ? esc(String(it.fib).replace('.', ',')) : ''}"></label>
             </div>
           </div>
         </div>`;
@@ -1411,35 +1755,45 @@
 
   // --- Mengen-Umrechner ---
 
-  const QTY_RE = /\d+(?:[.,]\d+)?/;
+  const SCALE_FACTORS = [
+    { factor: '0.3333333333', label: '× ⅓' },
+    { factor: '0.5', label: '× ½' },
+    { factor: '2', label: '× 2' }
+  ];
 
-  function parseQtyFromText(text) {
-    const m = String(text || '').match(QTY_RE);
-    return m ? parseGermanFloat(m[0]) : null;
+  function scaleChips(action) {
+    return SCALE_FACTORS.map(s =>
+      `<button type="button" class="chip" data-action="${action}" data-factor="${s.factor}">${s.label}</button>`
+    ).join('');
   }
 
   function formatQtyNumber(n) {
-    return String(Math.round(n * 10) / 10).replace('.', ',');
+    return Calc.fmtQty(n);
   }
 
-  // Ersetzt die erste Zahl im Mengentext durch die skalierte; null, wenn keine Zahl vorhanden.
-  function scaleQuantityText(text, factor) {
-    const s = String(text || '');
-    const m = s.match(QTY_RE);
-    if (!m) return null;
-    const q = parseGermanFloat(m[0]);
-    if (q === null || q <= 0) return null;
-    return s.replace(QTY_RE, formatQtyNumber(q * factor));
+  // Alle Zahlen des Mengentexts als Signatur „1|30“ – Grundlage für diffFactor().
+  function qtySignature(text) {
+    return Calc.quantityNumbers(text).map(n => n.value).join('|');
+  }
+  function qtySignatureToList(sig) {
+    if (!sig) return [];
+    return String(sig).split('|').map(Number).filter(n => isFinite(n));
   }
 
-  // Skaliert kcal/P/F/KH-Felder proportional von ihren AKTUELLEN Werten aus.
+  // Skaliert kcal/P/F/KH/Ballaststoffe proportional von ihren AKTUELLEN Werten aus.
+  // Ein leeres Ballaststoff-Feld bleibt leer (unbekannt bleibt unbekannt).
   function scaleNutrientInputs(fields, factor) {
     const kcalEl = fields.kcal;
     kcalEl.value = String(Math.max(0, Math.round((parseFloat(kcalEl.value) || 0) * factor)));
     [fields.p, fields.f, fields.kh].forEach(el => {
+      if (!el) return;
       const v = parseGermanFloat(el.value) || 0;
       el.value = formatQtyNumber(Math.max(0, v * factor));
     });
+    if (fields.fib && fields.fib.value.trim() !== '') {
+      const v = parseGermanFloat(fields.fib.value);
+      if (v !== null) fields.fib.value = formatQtyNumber(Math.max(0, v * factor));
+    }
   }
 
   function aiRowFields(row) {
@@ -1447,19 +1801,55 @@
       kcal: row.querySelector('.ai-kcal'),
       p: row.querySelector('.ai-p'),
       f: row.querySelector('.ai-f'),
-      kh: row.querySelector('.ai-kh')
+      kh: row.querySelector('.ai-kh'),
+      fib: row.querySelector('.ai-fib')
     };
   }
 
-  function scaleAiRow(row, factor) {
-    scaleNutrientInputs(aiRowFields(row), factor);
-    const mengeEl = row.querySelector('.ai-menge');
-    const scaled = scaleQuantityText(mengeEl.value, factor);
-    if (scaled !== null) {
-      mengeEl.value = scaled;
-      const q = parseQtyFromText(scaled);
-      row.dataset.qty = q !== null ? String(q) : '';
-    }
+  function editFields() {
+    return { kcal: $('#edit-kcal'), p: $('#edit-p'), f: $('#edit-f'), kh: $('#edit-kh'), fib: $('#edit-fib') };
+  }
+
+  // Chip-Skalierung: Nährwerte und Ankerzahl im Mengentext.
+  function scaleRow(fields, textEl, factor) {
+    scaleNutrientInputs(fields, factor);
+    if (!textEl) return;
+    const scaled = Calc.scaleAnchor(textEl.value, factor);
+    if (scaled !== null) textEl.value = scaled;
+    textEl.dataset.qty = qtySignature(textEl.value);
+  }
+
+  // Mengentext von Hand geändert: genau eine geänderte Zahl ergibt den Faktor.
+  function applyQuantityEdit(fields, textEl) {
+    const oldList = qtySignatureToList(textEl.dataset.qty);
+    const newList = Calc.quantityNumbers(textEl.value).map(n => n.value);
+    const factor = Calc.diffFactor(oldList, newList);
+    if (factor !== null) scaleNutrientInputs(fields, factor);
+    textEl.dataset.qty = newList.join('|');
+  }
+
+  // Tolerantes Parsen der Mengenangabe in der DB-Detailansicht: führende Zahl,
+  // optional gefolgt von einer Einheit („150 g“, „1,5 Stück“). Sonst null.
+  // „1 kg“ bzw. „0,5 l“ werden in die Basiseinheit des Lebensmittels umgerechnet,
+  // statt sie als 1 g bzw. 0,5 ml zu buchen. Bei Stück-Lebensmitteln bleibt die Zahl.
+  function parseAmountInput(value, foodUnit) {
+    const s = String(value == null ? '' : value).trim();
+    const m = s.match(/^(\d+(?:[.,]\d+)?)\s*(kg|g|ml|l|stk\.?|stück|st\.?)?$/i);
+    if (!m) return null;
+    const n = parseGermanFloat(m[1]);
+    if (n === null) return null;
+    const unit = (m[2] || '').toLowerCase();
+    const scalable = foodUnit === 'g' || foodUnit === 'ml';
+    return (scalable && (unit === 'kg' || unit === 'l')) ? n * 1000 : n;
+  }
+
+  function setAmountError(invalid) {
+    const input = $('#amount-input');
+    const msg = $('#amount-error');
+    const btn = document.querySelector('[data-action="add-food"]');
+    if (input) input.classList.toggle('input-error', invalid);
+    if (msg) msg.classList.toggle('hidden', !invalid);
+    if (btn) btn.disabled = invalid;
   }
 
   // --- Bearbeiten ---
@@ -1472,12 +1862,12 @@
           <input type="text" id="edit-name" value="${esc(e.name)}">
         </label>
         <label class="span2">Menge (Anzeige)
-          <input type="text" id="edit-amount" value="${esc(e.amount || '')}" placeholder="z. B. 150 g">
+          <input type="text" id="edit-amount" value="${esc(e.amount || '')}" placeholder="z. B. 150 g"
+            data-qty="${esc(qtySignature(e.amount || ''))}">
         </label>
         <div class="span2 scale-row">
           <span class="scale-label">Menge anpassen:</span>
-          <button type="button" class="chip" data-action="edit-scale" data-factor="0.5">× ½</button>
-          <button type="button" class="chip" data-action="edit-scale" data-factor="2">× 2</button>
+          ${scaleChips('edit-scale')}
         </div>
         <label>Kalorien (kcal)
           <input type="number" inputmode="numeric" id="edit-kcal" min="0" value="${e.kcal}">
@@ -1490,6 +1880,10 @@
         </label>
         <label>Kohlenhydrate (g)
           <input type="text" inputmode="decimal" id="edit-kh" value="${esc(String(e.kh || 0).replace('.', ','))}">
+        </label>
+        <label>Ballaststoffe (g)
+          <input type="text" inputmode="decimal" id="edit-fib" placeholder="unbekannt"
+            value="${e.fib !== undefined ? esc(String(e.fib).replace('.', ',')) : ''}">
         </label>
       </div>
       <button class="btn primary full" data-action="save-edit">Speichern</button>`;
@@ -1511,11 +1905,13 @@
     const amount = $('#amount-input');
     if (amount) {
       amount.addEventListener('input', () => {
-        const v = parseGermanFloat(amount.value);
-        if (v !== null && v > 0 && v < 100000) {
+        const v = parseAmountInput(amount.value, sheet.food && sheet.food.unit);
+        const valid = v !== null && v > 0 && v < 100000;
+        if (valid) {
           sheet.amount = v;
           updateFoodPreview();
         }
+        setAmountError(!valid);
       });
     }
     const photo = $('#ai-photo');
@@ -1536,29 +1932,35 @@
     if (aiText) {
       aiText.addEventListener('input', () => { sheet.ai.text = aiText.value; });
     }
-    // Mengenzahl im KI-Vorschlag editiert → Nährwerte proportional mitrechnen
+    // Mengentext im KI-Vorschlag editiert → Nährwerte proportional mitrechnen
     document.querySelectorAll('.ai-item .ai-menge').forEach(mengeEl => {
       mengeEl.addEventListener('change', () => {
         const row = mengeEl.closest('.ai-item');
-        const oldQty = parseGermanFloat(row.dataset.qty || '');
-        const newQty = parseQtyFromText(mengeEl.value);
-        if (oldQty !== null && oldQty > 0 && newQty !== null && newQty > 0 && newQty !== oldQty) {
-          scaleNutrientInputs(aiRowFields(row), newQty / oldQty);
-        }
-        row.dataset.qty = newQty !== null ? String(newQty) : '';
+        mengeEl.dataset.qty = row.dataset.qty;
+        applyQuantityEdit(aiRowFields(row), mengeEl);
+        row.dataset.qty = mengeEl.dataset.qty;
       });
     });
+    // Bearbeiten-Sheet: dieselbe Umrechnung wie in der KI-Liste
+    const editAmount = $('#edit-amount');
+    if (editAmount) {
+      editAmount.addEventListener('change', () => applyQuantityEdit(editFields(), editAmount));
+    }
+  }
+
+  function foodPreviewRows(vals) {
+    return `
+      <div><strong>${fmtKcal(vals.kcal)}</strong><span>kcal</span></div>
+      <div><strong>${NFx.format(vals.p)} g</strong><span>Protein</span></div>
+      <div><strong>${NFx.format(vals.f)} g</strong><span>Fett</span></div>
+      <div><strong>${NFx.format(vals.kh)} g</strong><span>KH</span></div>
+      <div><strong>${vals.fib !== undefined ? `${NFx.format(vals.fib)} g` : '–'}</strong><span>Ballastst.</span></div>`;
   }
 
   function updateFoodPreview() {
     const box = $('#food-preview');
     if (!box || !sheet || !sheet.food) return;
-    const vals = computeFood(sheet.food, sheet.amount);
-    box.innerHTML = `
-      <div><strong>${fmtKcal(vals.kcal)}</strong><span>kcal</span></div>
-      <div><strong>${NFx.format(vals.p)} g</strong><span>Protein</span></div>
-      <div><strong>${NFx.format(vals.f)} g</strong><span>Fett</span></div>
-      <div><strong>${NFx.format(vals.kh)} g</strong><span>KH</span></div>`;
+    box.innerHTML = foodPreviewRows(computeFood(sheet.food, sheet.amount));
   }
 
   async function runAiAnalyze() {
@@ -1609,8 +2011,10 @@
       const p = parseGermanFloat(row.querySelector('.ai-p').value) || 0;
       const f = parseGermanFloat(row.querySelector('.ai-f').value) || 0;
       const kh = parseGermanFloat(row.querySelector('.ai-kh').value) || 0;
+      const fibRaw = row.querySelector('.ai-fib').value.trim();
+      const fib = fibRaw === '' ? undefined : (parseGermanFloat(fibRaw) ?? undefined);
       if (!name || kcal <= 0) return;
-      addEntry(currentDay, sheet.meal, { name, amount: menge, kcal, p, f, kh });
+      addEntry(currentDay, sheet.meal, { name, amount: menge, kcal, p, f, kh, fib });
       added++;
     });
     if (added > 0) {
@@ -1638,20 +2042,24 @@
         break;
       case 'day-prev':
         currentDay = addDays(currentDay, -1);
+        activeEdit = false;
         renderToday();
         break;
       case 'day-next':
         if (currentDay < todayKey()) {
           currentDay = addDays(currentDay, 1);
+          activeEdit = false;
           renderToday();
         }
         break;
       case 'day-today':
         currentDay = todayKey();
+        activeEdit = false;
         renderToday();
         break;
       case 'open-day':
         currentDay = target.dataset.day;
+        activeEdit = false;
         activeTab = 'today';
         renderToday();
         updateTabbar();
@@ -1683,10 +2091,20 @@
         renderSheet();
         break;
       case 'add-food': {
+        // Feldwert beim Klick erneut lesen – nie still die alte Menge buchen
+        const raw = $('#amount-input')
+          ? parseAmountInput($('#amount-input').value, sheet.food && sheet.food.unit)
+          : sheet.amount;
+        if (raw === null || !(raw > 0) || raw >= 100000) {
+          setAmountError(true);
+          toast('Menge nicht erkannt – bitte als Zahl angeben, z. B. „150“.');
+          break;
+        }
+        sheet.amount = raw;
         const vals = computeFood(sheet.food, sheet.amount);
         addEntry(currentDay, sheet.meal, {
           name: sheet.food.name, amount: vals.label,
-          kcal: vals.kcal, p: vals.p, f: vals.f, kh: vals.kh
+          kcal: vals.kcal, p: vals.p, f: vals.f, kh: vals.kh, fib: vals.fib
         });
         showSheet(false);
         renderAll();
@@ -1737,7 +2155,10 @@
         if (entries.length === 0) { toast('Die gewählte Mahlzeit hat keine Einträge.'); break; }
         data.dishes.unshift({
           name: name.slice(0, 60),
-          items: entries.map(e => ({ name: e.name, amount: e.amount || '', kcal: e.kcal, p: e.p || 0, f: e.f || 0, kh: e.kh || 0 }))
+          items: entries.map(e => withFib(
+            { name: e.name, amount: e.amount || '', kcal: e.kcal, p: e.p || 0, f: e.f || 0, kh: e.kh || 0 },
+            e.fib
+          ))
         });
         persist();
         sheet.favMode = null;
@@ -1784,12 +2205,14 @@
         const kcal = parseFloat($('#quick-kcal').value) || 0;
         if (!name) { toast('Bitte eine Bezeichnung angeben.'); break; }
         if (kcal <= 0) { toast('Bitte Kalorien angeben.'); break; }
+        const fibRaw = $('#quick-fib').value.trim();
         addEntry(currentDay, sheet.meal, {
           name, amount: '',
           kcal,
           p: parseGermanFloat($('#quick-p').value) || 0,
           f: parseGermanFloat($('#quick-f').value) || 0,
-          kh: parseGermanFloat($('#quick-kh').value) || 0
+          kh: parseGermanFloat($('#quick-kh').value) || 0,
+          fib: fibRaw === '' ? undefined : (parseGermanFloat(fibRaw) ?? undefined)
         });
         showSheet(false);
         renderAll();
@@ -1816,17 +2239,15 @@
       }
       case 'ai-scale': {
         const row = target.closest('.ai-item');
-        if (row) scaleAiRow(row, parseFloat(target.dataset.factor));
+        if (!row) break;
+        const mengeEl = row.querySelector('.ai-menge');
+        scaleRow(aiRowFields(row), mengeEl, parseFloat(target.dataset.factor));
+        row.dataset.qty = mengeEl.dataset.qty;
         break;
       }
-      case 'edit-scale': {
-        const factor = parseFloat(target.dataset.factor);
-        scaleNutrientInputs({ kcal: $('#edit-kcal'), p: $('#edit-p'), f: $('#edit-f'), kh: $('#edit-kh') }, factor);
-        const amountEl = $('#edit-amount');
-        const scaled = scaleQuantityText(amountEl.value, factor);
-        if (scaled !== null) amountEl.value = scaled;
+      case 'edit-scale':
+        scaleRow(editFields(), $('#edit-amount'), parseFloat(target.dataset.factor));
         break;
-      }
       case 'ai-accept': acceptAiItems(); break;
 
       // Einträge
@@ -1868,6 +2289,14 @@
         entry.p = Math.round((parseGermanFloat($('#edit-p').value) || 0) * 10) / 10;
         entry.f = Math.round((parseGermanFloat($('#edit-f').value) || 0) * 10) / 10;
         entry.kh = Math.round((parseGermanFloat($('#edit-kh').value) || 0) * 10) / 10;
+        const fibRaw = $('#edit-fib').value.trim();
+        const fibParsed = fibRaw === '' ? undefined : parseGermanFloat(fibRaw);
+        if (fibRaw !== '' && fibParsed === null) {
+          toast('Ballaststoffe nicht erkannt – bitte eine Zahl wie 4,5 angeben.');
+          break;
+        }
+        const fibNew = fibValue(fibParsed ?? undefined);
+        if (fibNew === undefined) delete entry.fib; else entry.fib = fibNew;
         persist();
         showSheet(false);
         renderAll();
@@ -1887,10 +2316,77 @@
         toast(savedFor === todayKey() ? 'Gewicht gespeichert' : `Gewicht für ${fmtDateShort(savedFor)} gespeichert`);
         break;
       }
+      case 'save-waist': {
+        const v = parseGermanFloat($('#waist-input').value);
+        if (v === null || v < 40 || v > 250) { toast('Bitte einen Bauchumfang zwischen 40 und 250 cm angeben.'); break; }
+        const savedFor = weightDate;
+        data.waist[savedFor] = Math.round(v * 10) / 10;
+        weightDate = todayKey();
+        persist();
+        renderWeight();
+        toast(savedFor === todayKey() ? 'Bauchumfang gespeichert' : `Bauchumfang für ${fmtDateShort(savedFor)} gespeichert`);
+        break;
+      }
       case 'weight-range':
         weightRange = target.dataset.range;
         renderWeight();
         break;
+
+      // Aktivkalorien (Apple Watch)
+      case 'edit-active':
+        activeEdit = true;
+        renderToday();
+        {
+          const input = $('#active-input');
+          if (input) setTimeout(() => input.focus(), 50);
+        }
+        break;
+      case 'save-active': {
+        const raw = $('#active-input').value.trim();
+        if (raw === '') {
+          delete data.activeEnergy[currentDay];
+        } else {
+          // parseKcalToken statt parseGermanFloat: das Feld zeigt den Wert mit
+          // Tausenderpunkt an ("3.000"), der sonst als Dezimalpunkt gelesen würde.
+          const v = Calc.parseKcalToken(raw);
+          if (v === null || v < 0 || v > 10000) { toast('Bitte Aktivkalorien zwischen 0 und 10.000 angeben.'); break; }
+          data.activeEnergy[currentDay] = Math.round(v);
+        }
+        activeEdit = false;
+        persist();
+        renderAll();
+        toast(raw === '' ? 'Aktivkalorien entfernt' : 'Aktivkalorien gespeichert');
+        break;
+      }
+      case 'watch-check': {
+        watchImport.text = $('#watch-import').value;
+        watchImport.result = Calc.parseActiveEnergyLines(watchImport.text, todayKey());
+        refreshSettingsDerived();
+        break;
+      }
+      case 'watch-apply': {
+        // Immer den aktuellen Feldinhalt parsen – sonst würde ein nach dem Prüfen
+        // geänderter Text stillschweigend mit dem alten Ergebnis übernommen.
+        const box = $('#watch-import');
+        if (box) watchImport.text = box.value;
+        const res = Calc.parseActiveEnergyLines(watchImport.text, todayKey());
+        if (res.entries.length === 0) {
+          watchImport.result = res;
+          refreshSettingsDerived();
+          toast('Keine übernehmbare Zeile erkannt.');
+          break;
+        }
+        res.entries.forEach(e => { data.activeEnergy[e.key] = e.kcal; });
+        const count = res.entries.length;
+        // Unklare Zeilen bleiben stehen, damit sie nachgebessert werden können.
+        watchImport = { text: res.unclear.join('\n'), result: null };
+        persist();
+        renderAll();
+        toast(res.unclear.length > 0
+          ? `${NF0.format(count)} ${count === 1 ? 'Tag' : 'Tage'} übernommen · ${NF0.format(res.unclear.length)} unklare ${res.unclear.length === 1 ? 'Zeile bleibt' : 'Zeilen bleiben'} stehen`
+          : `${NF0.format(count)} ${count === 1 ? 'Tag' : 'Tage'} übernommen`);
+        break;
+      }
 
       // Einstellungen
       case 'export':
@@ -1990,6 +2486,7 @@
   // ---------- Start ----------
 
   if (data.profile) refreshAppliedTdee();
+  attachViewportTracking();
   renderAll();
   if (data.profile) maybeBackupHint();
 })();
