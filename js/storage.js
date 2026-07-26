@@ -8,11 +8,29 @@ const Storage = (() => {
   const CURRENT_VERSION = 2;
   const MEAL_IDS = ['breakfast', 'lunch', 'dinner', 'snacks'];
 
+  // Eine Quelle für die Settings-Defaults – defaults() und migrate() nutzen sie beide.
+  // Vollständig gelistet, damit ein Blick hierher zeigt, welche Felder es überhaupt gibt;
+  // die Werte entsprechen exakt dem, was die App bisher bei fehlendem Feld angenommen hat
+  // (aiWebSearch wurde als `!== false` gelesen, war also an).
+  function settingsDefaults() {
+    return {
+      theme: 'system',
+      apiKey: '',
+      aiWebSearch: true,          // Online-Recherche bei Markenprodukten
+      useCalibratedTdee: false,   // Verbrauchsbasis: Formel oder kalibriert
+      appliedTdee: null,          // täglich fortgeschriebene effektive TDEE
+      appliedTdeeDate: null,      // Tag, an dem appliedTdee zuletzt fortgeschrieben wurde
+      useActiveEnergy: false,     // Apple-Watch-Zuschlag aufs Tagesziel
+      lastExport: null,           // ISO-Zeitstempel des letzten Exports (JSON oder CSV)
+      lastBackupHint: null        // Tag, an dem zuletzt an ein Backup erinnert wurde
+    };
+  }
+
   function defaults() {
     return {
       version: CURRENT_VERSION,
       profile: null,
-      settings: { theme: 'system', apiKey: '' },
+      settings: settingsDefaults(),
       days: {},      // 'YYYY-MM-DD' → { meals: { breakfast:[], lunch:[], dinner:[], snacks:[] } }
       weights: {},   // 'YYYY-MM-DD' → kg (Zahl, 1 Dezimalstelle)
       waist: {},     // 'YYYY-MM-DD' → Bauchumfang in cm (Zahl)
@@ -89,7 +107,7 @@ const Storage = (() => {
     if (!data || typeof data !== 'object') return defaults();
     const base = defaults();
     const merged = Object.assign(base, data);
-    merged.settings = Object.assign({ theme: 'system', apiKey: '' }, data.settings || {});
+    merged.settings = Object.assign(settingsDefaults(), data.settings || {});
     merged.days = sanitizeDays(data.days);
     merged.weights = numberMap(data.weights, 30, 300);
     merged.waist = numberMap(data.waist, 20, 300);

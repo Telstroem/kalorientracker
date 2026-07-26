@@ -222,10 +222,17 @@
     persist();
   }
 
+  // Tagesbilanz eines Tages, UNGERUNDET – für Summen und Mittelwerte.
+  // Fürs Anzeigen eines einzelnen Tages gibt es Calc.dayDeficit(), das rundet;
+  // hier würde tageweises Runden den Fehler über das Fenster aufsummieren.
+  function deficitFor(key) {
+    return metricsFor(key).tdee - dayTotals(key).kcal;
+  }
+
   function avgDeficit(lastN) {
     const keys = trackedKeys().filter(k => k <= todayKey()).slice(-lastN);
     if (keys.length === 0) return { avg: 0, count: 0 };
-    const sum = keys.reduce((acc, k) => acc + (metricsFor(k).tdee - dayTotals(k).kcal), 0);
+    const sum = keys.reduce((acc, k) => acc + deficitFor(k), 0);
     return { avg: sum / keys.length, count: keys.length };
   }
 
@@ -359,7 +366,7 @@
   function renderToday() {
     const m = metricsFor(currentDay);
     const totals = dayTotals(currentDay);
-    const deficit = Math.round(m.tdee - totals.kcal);
+    const deficit = Calc.dayDeficit(m.tdee, totals.kcal);
     const day = getDay(currentDay);
     const isToday = currentDay === todayKey();
 
@@ -794,10 +801,10 @@
 
     const last7 = trackedKeys().filter(k => k <= t && k >= addDays(t, -6));
     const avgKcal7 = last7.length ? last7.reduce((a, k) => a + dayTotals(k).kcal, 0) / last7.length : null;
-    const avgDef7 = last7.length ? last7.reduce((a, k) => a + (metricsFor(k).tdee - dayTotals(k).kcal), 0) / last7.length : null;
+    const avgDef7 = last7.length ? last7.reduce((a, k) => a + deficitFor(k), 0) / last7.length : null;
 
     const allTracked = trackedKeys().filter(k => k <= t);
-    const cumDeficit = allTracked.reduce((a, k) => a + (metricsFor(k).tdee - dayTotals(k).kcal), 0);
+    const cumDeficit = allTracked.reduce((a, k) => a + deficitFor(k), 0);
     const kgFat = cumDeficit / Calc.KCAL_PER_KG_FAT;
     const cumCount = allTracked.length;
     const cumAvg = cumCount ? cumDeficit / cumCount : 0;
@@ -865,7 +872,7 @@
       html += '<div class="history-list">';
       listKeys.forEach(k => {
         const tot = dayTotals(k);
-        const def = Math.round(metricsFor(k).tdee - tot.kcal);
+        const def = Calc.dayDeficit(metricsFor(k).tdee, tot.kcal);
         html += `
         <div class="history-row" data-action="open-day" data-day="${k}" role="button">
           <div class="history-date">${esc(fmtDateShort(k))}</div>
@@ -998,9 +1005,7 @@
         <div class="btn-row" style="margin-top:10px">
           <button class="btn" data-action="export-csv">Tage als CSV exportieren</button>
         </div>
-        <p class="hint" id="export-status">${lastExportLabel()} Die CSV enthält je getracktem Tag kcal,
-        Makros inkl. Ballaststoffen, Verbrauch, Defizit, Gewicht, Bauchumfang und Aktivkalorien
-        (Semikolon-getrennt, für Excel).</p>
+        <p class="hint" id="export-status">${esc(exportStatusText())}</p>
       </div>
 
       <div class="card">
@@ -1057,11 +1062,7 @@
     const applyBtn = document.querySelector('[data-action="watch-apply"]');
     if (applyBtn) applyBtn.disabled = !(watchImport.result && watchImport.result.entries.length);
     const exportBox = $('#export-status');
-    if (exportBox) {
-      exportBox.textContent = `${lastExportLabel()} Die CSV enthält je getracktem Tag kcal, ` +
-        'Makros inkl. Ballaststoffen, Verbrauch, Defizit, Gewicht, Bauchumfang und Aktivkalorien ' +
-        '(Semikolon-getrennt, für Excel).';
-    }
+    if (exportBox) exportBox.textContent = exportStatusText();
   }
 
   function activeEnergyStatus() {
@@ -1138,6 +1139,14 @@
     }
   }
 
+  // Wird an zwei Stellen gebraucht: beim vollen Rendern der Einstellungen und beim
+  // partiellen Refresh (der nicht neu rendert, damit Tippstände erhalten bleiben).
+  function exportStatusText() {
+    return `${lastExportLabel()} Die CSV enthält je getracktem Tag kcal, ` +
+      'Makros inkl. Ballaststoffen, Verbrauch, Defizit, Gewicht, Bauchumfang und Aktivkalorien ' +
+      '(Semikolon-getrennt, für Excel).';
+  }
+
   function lastExportLabel() {
     const ts = data.settings.lastExport ? Date.parse(data.settings.lastExport) : null;
     if (!ts || !isFinite(ts)) return 'Noch kein Export erstellt.';
@@ -1171,7 +1180,7 @@
         de1(tot.kh),
         de1(tot.fib),
         String(m.tdee),
-        String(Math.round(m.tdee - tot.kcal)),
+        String(Calc.dayDeficit(m.tdee, tot.kcal)),
         weight != null ? de1(weight) : '',
         waist != null ? de1(waist) : '',
         active != null ? String(Math.round(active)) : ''

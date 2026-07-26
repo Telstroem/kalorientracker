@@ -1,0 +1,42 @@
+#!/bin/sh
+# Blockiert Commits, die ausgelieferte Dateien ändern, ohne CACHE_VERSION in sw.js
+# zu erhöhen. Ohne Bump liefert der Service Worker auf dem iPhone weiter die alte
+# Version aus – der Fehler fällt niemandem auf, weil der Push erfolgreich aussieht.
+#
+# Aktivieren (einmalig pro Klon):  git config core.hooksPath .githooks
+# Bewusst überspringen:            KT_SKIP_CACHE_CHECK=1 git commit …
+
+[ -n "$KT_SKIP_CACHE_CHECK" ] && exit 0
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+assets=$(printf '%s\n' "$staged" | grep -E '^(index\.html|manifest\.webmanifest|js/.+\.js|css/.+\.css|icons/.+)$')
+[ -z "$assets" ] && exit 0
+
+read_version() {
+  git show "$1:sw.js" 2>/dev/null | sed -n "s/^const CACHE_VERSION = '\([^']*\)';.*/\1/p"
+}
+
+alt=$(read_version HEAD)
+neu=$(read_version "")   # ":sw.js" = Index; ohne Staging identisch mit HEAD
+
+if [ -z "$neu" ]; then
+  echo "pre-commit: CACHE_VERSION in sw.js nicht gefunden – Hook prüfen." >&2
+  exit 1
+fi
+
+if [ "$alt" = "$neu" ]; then
+  echo "" >&2
+  echo "  Commit gestoppt: ausgelieferte Dateien geändert, CACHE_VERSION steht weiter auf '$neu'." >&2
+  echo "" >&2
+  printf '%s\n' "$assets" | sed 's/^/    /' >&2
+  echo "" >&2
+  echo "  Ohne Bump holt die installierte PWA das Update nicht – bitte in sw.js erhöhen:" >&2
+  echo "" >&2
+  echo "    sed -i '' \"s/'$neu'/'kt-vN'/\" sw.js && git add sw.js" >&2
+  echo "" >&2
+  echo "  Bewusst überspringen: KT_SKIP_CACHE_CHECK=1 git commit …" >&2
+  echo "" >&2
+  exit 1
+fi
+
+exit 0
