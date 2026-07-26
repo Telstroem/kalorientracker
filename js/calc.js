@@ -179,6 +179,50 @@ const Calc = (() => {
     return 'deutlich erhöht';
   }
 
+  // Wünschenswerter BMI nach Altersgruppe (NRC-Tabelle, in Deutschland über die
+  // DGE verbreitet). Die WHO-Klassen (18,5/25/30) gelten altersunabhängig und
+  // bleiben in bmiCategory() erhalten – hier steht die altersgerechte Einordnung.
+  const BMI_AGE_RANGES = [
+    { maxAge: 24, min: 19, max: 24 },
+    { maxAge: 34, min: 20, max: 25 },
+    { maxAge: 44, min: 21, max: 26 },
+    { maxAge: 54, min: 22, max: 27 },
+    { maxAge: 64, min: 23, max: 28 },
+    { maxAge: Infinity, min: 24, max: 29 }
+  ];
+
+  function bmiRangeForAge(age) {
+    if (age == null || !isFinite(age)) return null;
+    const row = BMI_AGE_RANGES.find(r => age <= r.maxAge) || BMI_AGE_RANGES[BMI_AGE_RANGES.length - 1];
+    return { min: row.min, max: row.max };
+  }
+
+  function bmiCategoryForAge(value, age) {
+    const range = bmiRangeForAge(age);
+    if (value == null || !isFinite(value) || !range) return null;
+    if (value < range.min) return { level: 'below', text: 'unter dem Wunschbereich', range };
+    if (value <= range.max) return { level: 'in', text: 'im Wunschbereich', range };
+    if (value <= range.max + 3) return { level: 'above', text: 'über dem Wunschbereich', range };
+    return { level: 'far', text: 'deutlich über dem Wunschbereich', range };
+  }
+
+  // Altersangepasste WHtR-Schwelle (Ashwell): bis 40 Jahre 0,50, danach je
+  // Lebensjahr +0,01, ab 50 Jahre konstant 0,60.
+  function whtrThreshold(age) {
+    if (age == null || !isFinite(age)) return null;
+    if (age <= 40) return 0.5;
+    if (age >= 50) return 0.6;
+    return 0.5 + 0.01 * (age - 40);
+  }
+
+  function whtrCategoryForAge(value, age) {
+    const threshold = whtrThreshold(age);
+    if (value == null || !isFinite(value) || threshold === null) return null;
+    if (value < threshold) return { level: 'in', text: 'unauffällig', threshold };
+    if (value < threshold + 0.1) return { level: 'above', text: 'erhöht', threshold };
+    return { level: 'far', text: 'deutlich erhöht', threshold };
+  }
+
   // ---------- Mengentexte (Mengen-Umrechner) ----------
 
   const UNIT_AFTER_RE = /^\s*(kg|g|ml|l)\b/i;
@@ -534,6 +578,7 @@ const Calc = (() => {
     ageFromBirthYear, bmr, tdee, calorieGoal, proteinGoal,
     dayDeficit, weightTrend, forecast, forecastFromSlope, milestones, nextMilestone,
     bmi, bmiCategory, whtr, whtrCategory,
+    bmiRangeForAge, bmiCategoryForAge, whtrThreshold, whtrCategoryForAge,
     quantityNumbers, diffFactor, scaleAnchor,
     isoWeek, weeklyStats, trendSlope, calibrationWindow, calibratedTdee,
     effectiveTdee, limitDrift,

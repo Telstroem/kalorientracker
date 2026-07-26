@@ -446,6 +446,39 @@
       </div>`;
   }
 
+  // Einordnungs-Skala für BMI und Taille/Größe: Farbband mit hartem Zonenwechsel,
+  // Marker beim eigenen Wert, beschriftete Marken an den Zonengrenzen.
+  // zones: [{ upto, token }] aufsteigend, die letzte Zone reicht bis max.
+  // ticks: [{ at, label }]
+  function gaugeBar(value, min, max, zones, ticks) {
+    const span = max - min;
+    if (!(span > 0)) return '';
+    const pct = v => Math.max(0, Math.min(100, (v - min) / span * 100));
+    const stops = [];
+    let from = 0;
+    zones.forEach((z, i) => {
+      const to = i === zones.length - 1 ? 100 : pct(z.upto);
+      stops.push(`var(${z.token}) ${from.toFixed(2)}% ${to.toFixed(2)}%`);
+      from = to;
+    });
+    const markerPct = value == null || !isFinite(value) ? null : pct(value);
+    // Für Screenreader ausgeblendet: Wert und Einordnung stehen als Text daneben,
+    // das Band würde nur leere Elemente vorlesen.
+    return `
+      <div class="gauge" aria-hidden="true">
+        <div class="gauge-track" style="background: linear-gradient(90deg, ${stops.join(', ')})">
+          ${markerPct === null ? '' : `<span class="gauge-marker" style="left:${markerPct.toFixed(2)}%"></span>`}
+        </div>
+        <div class="gauge-ticks">
+          ${(ticks || []).map(t =>
+            `<span class="gauge-tick" style="left:${pct(t.at).toFixed(2)}%">${esc(t.label)}</span>`
+          ).join('')}
+        </div>
+      </div>`;
+  }
+
+  const LEVEL_CLASS = { in: 'val-ok', below: 'val-caution', above: 'val-caution', far: 'val-over' };
+
   // Dezente Zeile unter dem Ring: Aktivkalorien des angezeigten Tages, Tap öffnet ein Inline-Feld.
   function activeEnergyRow() {
     if (!data.settings.useActiveEnergy) return '';
@@ -541,23 +574,66 @@
         </div>
       </div>` : '';
 
+    const age = Calc.ageFromBirthYear(p.birthYear);
+    const bmiCat = Calc.bmiCategoryForAge(bmiValue, age);
+    const whtrCat = Calc.whtrCategoryForAge(whtrValue, age);
+
+    const bmiScale = bmiCat ? gaugeBar(bmiValue, 17, 37, [
+      { upto: bmiCat.range.min, token: '--caution' },
+      { upto: bmiCat.range.max, token: '--accent' },
+      { upto: bmiCat.range.max + 3, token: '--caution' },
+      { token: '--over' }
+    ], [
+      { at: bmiCat.range.min, label: NF0.format(bmiCat.range.min) },
+      { at: bmiCat.range.max, label: NF0.format(bmiCat.range.max) }
+    ]) : '';
+
+    // Zweite Marke nur, wenn die Altersschwelle vom allgemeinen Richtwert abweicht.
+    const whtrTicks = whtrCat
+      ? (whtrCat.threshold === 0.5
+        ? [{ at: 0.5, label: '0,50' }]
+        : [{ at: 0.5, label: '0,50' }, { at: whtrCat.threshold, label: NF2.format(whtrCat.threshold) }])
+      : [];
+    // Domäne bis 0,75, damit die Orange-Zone auch bei der höchsten Schwelle (0,60) sichtbar bleibt.
+    const whtrScale = whtrCat ? gaugeBar(whtrValue, 0.4, 0.75, [
+      { upto: whtrCat.threshold, token: '--accent' },
+      { upto: whtrCat.threshold + 0.1, token: '--caution' },
+      { token: '--over' }
+    ], whtrTicks) : '';
+
     const bodyTiles = `
-      <div class="tile-grid">
-        <div class="card tile">
-          <div class="tile-value">${waistNow !== null ? `${NFx.format(waistNow)} cm` : '–'}</div>
-          <div class="tile-label">${waistNow !== null && waistStart !== null && waist.length > 1
-            ? `Bauchumfang · ${signedCm(waistNow - waistStart)} seit Start`
-            : 'Bauchumfang'}</div>
+      <div class="card">
+        <div class="card-title">Körpermaße</div>
+
+        <div class="body-block">
+          <div class="body-head">
+            <span class="body-value">${waistNow !== null ? `${NFx.format(waistNow)} cm` : '–'}</span>
+            ${waistNow !== null && waistStart !== null && waist.length > 1
+              ? `<span class="body-verdict">${esc(signedCm(waistNow - waistStart))} seit Start</span>` : ''}
+          </div>
+          <div class="body-note">Bauchumfang${waistNow === null ? ' – noch nicht eingetragen' : ''}</div>
         </div>
-        <div class="card tile">
-          <div class="tile-value">${whtrValue !== null ? NF2.format(whtrValue) : '–'}</div>
-          <div class="tile-label">${whtrValue !== null
-            ? `Taille/Größe – ${esc(Calc.whtrCategory(whtrValue))} (Richtwert &lt; 0,50)`
+
+        <div class="body-block">
+          <div class="body-head">
+            <span class="body-value ${bmiCat ? LEVEL_CLASS[bmiCat.level] : ''}">${bmiValue !== null ? `BMI ${NFx.format(bmiValue)}` : 'BMI –'}</span>
+            ${bmiCat ? `<span class="body-verdict">${esc(bmiCat.text)}</span>` : ''}
+          </div>
+          ${bmiScale}
+          <div class="body-note">${bmiCat
+            ? `Wunschbereich für ${NF0.format(age)} Jahre: ${NF0.format(bmiCat.range.min)}–${NF0.format(bmiCat.range.max)} · nach WHO: ${esc(Calc.bmiCategory(bmiValue))} · Orientierungswerte, keine medizinische Bewertung`
+            : 'Orientierungswerte, keine medizinische Bewertung'}</div>
+        </div>
+
+        <div class="body-block">
+          <div class="body-head">
+            <span class="body-value ${whtrCat ? LEVEL_CLASS[whtrCat.level] : ''}">${whtrValue !== null ? NF2.format(whtrValue) : '–'}</span>
+            ${whtrCat ? `<span class="body-verdict">${esc(whtrCat.text)}</span>` : ''}
+          </div>
+          ${whtrScale}
+          <div class="body-note">${whtrCat
+            ? `Taille/Größe · Grenzwert mit ${NF0.format(age)} Jahren: ${NF2.format(whtrCat.threshold)}${whtrCat.threshold === 0.5 ? '' : ' · allgemeiner Richtwert: 0,50'}`
             : 'Taille/Größe – Bauchumfang eintragen'}</div>
-        </div>
-        <div class="card tile wide">
-          <div class="tile-value">${bmiValue !== null ? `BMI ${NFx.format(bmiValue)}` : '–'}</div>
-          <div class="tile-label">${bmiValue !== null ? esc(Calc.bmiCategory(bmiValue)) : 'BMI'} · Orientierungswerte, keine medizinische Bewertung</div>
         </div>
       </div>`;
 
@@ -571,17 +647,13 @@
 
       <div class="card">
         <label class="field-label" for="weight-input">Gewicht (kg)</label>
-        <div class="inline-form">
-          <input id="weight-input" type="text" inputmode="decimal" placeholder="z. B. 82,4"
-            value="${dateWeight != null ? esc(NF1.format(dateWeight)) : ''}">
-          <button class="btn primary" data-action="save-weight" aria-label="Gewicht speichern">Speichern</button>
-        </div>
+        <input id="weight-input" type="text" inputmode="decimal" placeholder="z. B. 82,4"
+          value="${dateWeight != null ? esc(NF1.format(dateWeight)) : ''}">
         <label class="field-label waist-label" for="waist-input">Bauchumfang (cm) – optional</label>
-        <div class="inline-form">
-          <input id="waist-input" type="text" inputmode="decimal" placeholder="z. B. 96,5"
-            value="${dateWaist != null ? esc(NFx.format(dateWaist)) : ''}">
-          <button class="btn" data-action="save-waist" aria-label="Bauchumfang speichern">Speichern</button>
-        </div>
+        <input id="waist-input" type="text" inputmode="decimal" placeholder="z. B. 96,5"
+          value="${dateWaist != null ? esc(NFx.format(dateWaist)) : ''}">
+        <button class="btn primary full" data-action="save-body"
+          aria-label="Gewicht und Bauchumfang speichern">Speichern</button>
         <div class="weight-date">für
           <label class="date-tap" aria-label="Datum für Gewicht und Bauchumfang wählen">${esc(dateLabel)}
             <input type="date" id="weight-date" value="${weightDate}"
@@ -727,6 +799,8 @@
     const allTracked = trackedKeys().filter(k => k <= t);
     const cumDeficit = allTracked.reduce((a, k) => a + (metricsFor(k).tdee - dayTotals(k).kcal), 0);
     const kgFat = cumDeficit / Calc.KCAL_PER_KG_FAT;
+    const cumCount = allTracked.length;
+    const cumAvg = cumCount ? cumDeficit / cumCount : 0;
 
     let html = `
       <h1 class="view-title">Verlauf</h1>
@@ -748,7 +822,10 @@
         </div>
         <div class="card tile wide">
           <div class="tile-value ${cumDeficit < 0 ? 'neg' : ''}">${cumDeficit < 0 ? '+' : ''}${fmtKcal(Math.abs(cumDeficit))} kcal</div>
-          <div class="tile-label">Kumuliertes ${cumDeficit < 0 ? 'Plus' : 'Defizit'} gesamt · ≈ ${NF1.format(Math.abs(kgFat))} kg Fett</div>
+          <div class="tile-label">Kumuliertes ${cumDeficit < 0 ? 'Plus' : 'Defizit'}${cumCount
+            ? ` aus ${NF0.format(cumCount)} ${cumCount === 1 ? 'erfasstem Tag' : 'erfassten Tagen'} seit ${esc(fmtDateShort(allTracked[0]))}`
+            : ''} · ≈ ${NF1.format(Math.abs(kgFat))} kg Fett</div>
+          ${cumCount ? `<div class="tile-label">Ø ${cumAvg < 0 ? '+' : ''}${fmtKcal(Math.abs(cumAvg))} kcal pro erfasstem Tag · Tage ohne Eintrag zählen nicht mit</div>` : ''}
         </div>
       </div>`;
 
@@ -931,7 +1008,7 @@
         <button class="btn danger" data-action="delete-all">Alle Daten löschen</button>
       </div>
 
-      <p class="hint center">Kalorientracker · Version 1.5 · Daten bleiben auf dem Gerät</p>`;
+      <p class="hint center">Kalorientracker · Version 1.6 · Daten bleiben auf dem Gerät</p>`;
 
     $('#view-settings').innerHTML = html;
 
@@ -2410,8 +2487,7 @@
       // Gewicht und Bauchumfang teilen sich das Datum und werden gemeinsam gespeichert:
       // sonst löscht das Neuzeichnen nach dem einen Speichern den getippten anderen Wert
       // (und ein anschließendes zweites Speichern landete auf dem falschen Tag).
-      case 'save-weight':
-      case 'save-waist': {
+      case 'save-body': {
         const savedFor = weightDate;
         const rawWeight = ($('#weight-input') || {}).value;
         const rawWaist = ($('#waist-input') || {}).value;

@@ -9,6 +9,9 @@
   --accent-btn-text: #ffffff;
   --warn: #d96545;
   --caution: #c9a11c;
+  /* Als Textfarbe reicht --caution nicht: auf weißer Karte nur 2,26:1.
+     Eigenes dunkleres Gelb für Zahlen (4,89:1), analog zu --accent-btn. */
+  --caution-text: #8a6a08;
   --over: #b95e14;
   --bg: #f2f3f6;
   --card: #ffffff;
@@ -30,6 +33,7 @@
     --accent-btn-text: #0e0f12;
     --warn: #e57a58;
     --caution: #d9b649;
+    --caution-text: #d9b649;
     --over: #d07a2e;
     --bg: #0e0f12;
     --card: #1a1c21;
@@ -50,6 +54,7 @@
   --accent-btn-text: #0e0f12;
   --warn: #e57a58;
   --caution: #d9b649;
+  --caution-text: #d9b649;
   --over: #d07a2e;
   --bg: #0e0f12;
   --card: #1a1c21;
@@ -281,6 +286,34 @@ textarea { resize: vertical; }
 .macro-protein .macro-fill { opacity: 1; }
 .macro-fill.done { background: var(--accent); }
 .macro-note { font-size: 0.72rem; color: var(--muted); margin-top: 4px; }
+
+/* Einordnungs-Skala (BMI, Taille/Größe): Farbband mit Marker */
+.body-block { padding-top: 14px; margin-top: 14px; border-top: 1px solid var(--border); }
+.body-block:first-child { padding-top: 0; margin-top: 0; border-top: none; }
+.body-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.body-value { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.01em; }
+/* Bewusst nicht eingefärbt: bei 13 px verlangt WCAG 4,5:1, das schafft --accent
+   auf weißer Karte nicht (3,38:1). Die Ampel trägt die große Zahl und das Band. */
+.body-verdict { font-size: 0.82rem; font-weight: 600; text-align: right; color: var(--muted); }
+.body-note { font-size: 0.72rem; color: var(--muted); margin-top: 6px; }
+
+.val-ok { color: var(--accent); }
+.val-caution { color: var(--caution-text); }
+.val-over { color: var(--over); }
+
+.gauge { margin-top: 10px; }
+.gauge-track { position: relative; height: 7px; border-radius: 4px; }
+.gauge-marker {
+  position: absolute; top: -3px; width: 3px; height: 13px;
+  border-radius: 2px; background: var(--text);
+  box-shadow: 0 0 0 2px var(--card);
+  transform: translateX(-1.5px);
+}
+.gauge-ticks {
+  position: relative; height: 14px; margin-top: 3px;
+  font-size: 0.68rem; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.gauge-tick { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
 
 /* Aktivkalorien-Zeile unter dem Ring */
 .active-row {
