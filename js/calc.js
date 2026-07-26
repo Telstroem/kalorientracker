@@ -460,11 +460,11 @@ const Calc = (() => {
   }
 
   // Effektiver TDEE: gedämpfte Mischung aus Formel und Beobachtung.
-  // Beobachtungsgewicht wächst mit Datenmenge (days/56, max. 0,75),
+  // Beobachtungsgewicht wächst mit Datenmenge (days/28, max. 0,75),
   // Ergebnis hart auf ±25 % um den Formel-TDEE begrenzt.
   // days ist die Zahl getrackter Tage im 28-Tage-Fenster und damit <= 28: der Nenner
-  // muss 28 sein, damit der dokumentierte Deckel von 0,75 überhaupt erreichbar ist
-  // (mit /56 lag das Gewicht strukturell nie über 0,5).
+  // muss 28 sein, damit der Deckel von 0,75 überhaupt erreichbar ist — mit dem
+  // ursprünglichen /56 lag das Gewicht strukturell nie über 0,5 (Fix aus v1.5).
   function effectiveTdee(formulaTdee, calibration) {
     if (!calibration || !isFinite(formulaTdee) || formulaTdee <= 0) {
       return { tdee: Math.round(formulaTdee), blended: false, weight: 0 };

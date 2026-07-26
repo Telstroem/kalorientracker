@@ -31,8 +31,13 @@ Safari öffnen → Teilen → „Zum Home-Bildschirm", dann startet die App im V
   erfasste Tage und weist Unsicherheit und Abdeckung offen aus
   („≈ 2.450 kcal (± 130) · 24 von 28 Tagen erfasst“).
 - **Bauchumfang & BMI:** optionales zweites Maß im Gewicht-Tab (mit eigenem
-  Verlaufsdiagramm), dazu Kacheln für Δ seit Start, **WHtR** (Taille/Größe,
-  Richtwert < 0,50) und **BMI** mit neutraler Einordnung. Reine Anzeige — ohne
+  Verlaufsdiagramm), dazu die Karte „Körpermaße" mit Δ seit Start, **BMI** und
+  **WHtR** (Taille/Größe). Beide werden **altersabhängig** eingeordnet — BMI
+  gegen den wünschenswerten Bereich nach Altersgruppe (NRC-/DGE-Tabelle,
+  z. B. 45–54 Jahre: 22–27), WHtR gegen die Ashwell-Schwelle (bis 40 Jahre
+  0,50, danach +0,01 je Lebensjahr, ab 50 Jahre 0,60). Jeder Wert bekommt ein
+  Farbband mit Marker; die WHO-Klasse steht als Zusatzzeile daneben, weil sie
+  altersunabhängig gilt und in anderen Rechnern auftaucht. Reine Anzeige — ohne
   Einfluss auf Kalorienziel oder Prognose, keine medizinische Bewertung.
 - **Aktivkalorien der Apple Watch (optional, Standard aus):** Werte lassen sich
   einzeln im Heute-Tab oder gesammelt in den Einstellungen eintragen
@@ -42,9 +47,13 @@ Safari öffnen → Teilen → „Zum Home-Bildschirm", dann startet die App im V
   erst ab 7 erfassten Tagen — die mittlere Aktivität steckt schon im
   Aktivitätslevel bzw. in der Kalibrierung und würde sonst doppelt zählen. Die
   Kalibrierung selbst bleibt davon unberührt.
-- **Verlauf:** Kalorien der letzten 14 Tage, Ø-Werte, kumuliertes Defizit
-  (umgerechnet in kg Fett), Wochenübersicht (Ø kcal, Ø Protein,
-  Zieleinhaltung, Gewichtsveränderung).
+- **Verlauf:** Kalorien der letzten 14 Tage, Ø-Werte, kumuliertes Defizit und
+  Wochenübersicht (Ø kcal, Ø Protein, Zieleinhaltung, Gewichtsveränderung).
+  Das kumulierte Defizit summiert **alle erfassten Tage seit dem ersten
+  Eintrag** — Tage ohne Eintrag zählen nicht mit, weil für sie nichts bekannt
+  ist. Die Kachel nennt deshalb Anzahl und Startdatum der erfassten Tage sowie
+  den Ø pro erfasstem Tag; die Umrechnung in kg Fett kann darum kleiner
+  ausfallen als die tatsächliche Gewichtsabnahme.
 - **Einstellungen:** Körperdaten und Ziele (BMR/TDEE nach Mifflin-St-Jeor),
   Farbschema, Export/Import als JSON, **CSV-Export** der Tageswerte für Excel
   (Semikolon-getrennt, deutsches Zahlenformat; Spalten `Datum`, `kcal`,
@@ -97,7 +106,17 @@ per Doppelklick funktioniert auch, nur der Service Worker/Offline-Modus braucht
 
 Bei Updates: Dateien ändern, committen, pushen — und in `sw.js` die Konstante
 `CACHE_VERSION` hochzählen (z. B. `kt-v2`), damit installierte Geräte die neue
-Version laden.
+Version laden. Wird der Bump vergessen, liefert der Service Worker cache-first
+weiter die alte Version aus, obwohl der Push erfolgreich aussieht.
+
+Dagegen liegt ein Pre-Commit-Hook im Repo, der solche Commits blockiert. Nach
+einem frischen Klon einmalig aktivieren (Hooks sind nicht Teil des Checkouts):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Bewusst überspringen lässt er sich mit `KT_SKIP_CACHE_CHECK=1 git commit …`.
 
 ## Installation auf iPhone/iPad
 
