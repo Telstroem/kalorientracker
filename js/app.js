@@ -277,6 +277,7 @@
     ensureDay(dayKey).meals[mealId].push(entry);
     pushRecent(entry);
     persist();
+    return entry;
   }
 
   function deleteEntry(dayKey, mealId, id) {
@@ -1013,7 +1014,7 @@
         <button class="btn danger" data-action="delete-all">Alle Daten löschen</button>
       </div>
 
-      <p class="hint center">Kalorientracker · Version 1.6 · Daten bleiben auf dem Gerät</p>`;
+      <p class="hint center">Kalorientracker · Version 1.7 · Daten bleiben auf dem Gerät</p>`;
 
     $('#view-settings').innerHTML = html;
 
@@ -1470,6 +1471,9 @@
     sheet = {
       meal: mealId, tab: 'search', query: '', food: null, amount: null, editing: null,
       favMode: null, dishMeal: null,
+      // Mehrfachbuchung aus Favoriten/Letzte: added trägt die Undo-Kette,
+      // addedByKey die Zähler für die Badges der Zeilen.
+      added: [], addedByKey: {},
       ai: { text: '', image: null, items: null, busy: false, error: '', mode: 'meal', webSearchUsed: false }
     };
     renderSheet();
@@ -1577,6 +1581,7 @@
   function showSheet(visible) {
     $('#sheet').classList.toggle('hidden', !visible);
     $('#sheet-backdrop').classList.toggle('hidden', !visible);
+    document.body.classList.toggle('sheet-open', visible);
     if (visible) {
       attachSheetViewport();
     } else {
@@ -1612,7 +1617,8 @@
 
     $('#sheet').innerHTML = `
       <div class="sheet-header">
-        <div class="sheet-title">${isEdit ? 'Eintrag bearbeiten' : mealLabel(sheet.meal)}</div>
+        <div class="sheet-title">${isEdit ? 'Eintrag bearbeiten' : mealLabel(sheet.meal)}<span
+          class="sheet-count" id="sheet-count">${esc(addedCountText())}</span></div>
         <button class="icon-btn" data-action="close-sheet" aria-label="Schließen">×</button>
       </div>
       ${tabs}
@@ -1675,7 +1681,7 @@
         </button>`).join('');
         html += own.map(item => `
         <button class="list-row" data-action="add-saved" data-key="${esc(itemKey(item))}">
-          <span class="list-name">${esc(item.name)}</span>
+          <span class="list-name">${esc(item.name)}${addCountBadge(itemKey(item))}</span>
           <span class="list-info">${esc(item.amount || '')}${item.amount ? ' · ' : ''}${fmtKcal(item.kcal)} kcal</span>
         </button>`).join('');
       }
@@ -1756,7 +1762,7 @@
       return `
       <div class="list-row split">
         <button class="list-tap" data-action="add-saved" data-key="${esc(itemKey(item))}">
-          <span class="list-name">${esc(item.name)}</span>
+          <span class="list-name">${esc(item.name)}${addCountBadge(itemKey(item))}</span>
           <span class="list-info">${esc(item.amount || '')}${item.amount ? ' · ' : ''}${fmtKcal(item.kcal)} kcal</span>
         </button>
         <button class="star ${fav ? 'on' : ''}" data-action="toggle-fav" data-key="${esc(itemKey(item))}" aria-label="Favorit">${fav ? '★' : '☆'}</button>
@@ -1829,6 +1835,75 @@
     return data.favorites.find(f => itemKey(f) === key) || data.recents.find(r => itemKey(r) === key) || null;
   }
 
+  // --- Mehrfachbuchung aus Favoriten/Letzte ---
+  // Das Sheet bleibt offen, jeder Tap bucht. Die Liste wird dabei bewusst NICHT neu
+  // gezeichnet: addEntry stellt den Eintrag über pushRecent an den Anfang von
+  // data.recents – ein Neuzeichnen sortierte die Zeilen unter dem Finger um, der
+  // nächste Tap träfe ein anderes Lebensmittel. Nachgezogen werden nur der Zähler
+  // der Zeile und der im Sheet-Kopf.
+
+  function addCountBadge(key) {
+    const n = (sheet && sheet.addedByKey && sheet.addedByKey[key]) || 0;
+    return `<span class="add-count" data-count-key="${esc(key)}">${n > 0 ? `${NF0.format(n)}×` : ''}</span>`;
+  }
+
+  function addedCountText() {
+    if (!sheet || !sheet.added || !sheet.added.length) return '';
+    return ` · ${NF0.format(sheet.added.length)} hinzugefügt`;
+  }
+
+  function cssEscape(value) {
+    return (window.CSS && CSS.escape) ? CSS.escape(value) : String(value).replace(/["\\]/g, '\\$&');
+  }
+
+  function refreshAddedUi(key) {
+    if (!sheet) return;
+    const countEl = $('#sheet-count');
+    if (countEl) countEl.textContent = addedCountText();
+    if (key == null) return;
+    const n = sheet.addedByKey[key] || 0;
+    document.querySelectorAll(`#sheet [data-count-key="${cssEscape(key)}"]`).forEach(el => {
+      el.textContent = n > 0 ? `${NF0.format(n)}×` : '';
+    });
+  }
+
+  function addSavedItem(key) {
+    const item = findSaved(key);
+    if (!item || !sheet) return;
+    const dayKey = currentDay;
+    const mealId = sheet.meal;
+    const entry = addEntry(dayKey, mealId, item);
+    sheet.added.push({ mealId, id: entry.id, name: entry.name });
+    sheet.addedByKey[key] = (sheet.addedByKey[key] || 0) + 1;
+    refreshAddedUi(key);
+    renderToday();
+    toast(`„${entry.name}“ hinzugefügt`, {
+      actionLabel: 'Rückgängig',
+      duration: 4000,
+      onAction: () => undoAddedItem(dayKey, mealId, entry.id, key)
+    });
+  }
+
+  // Der Toast überlebt das Schließen des Sheets – der Undo muss also auch ohne Sheet
+  // funktionieren. Der Zähler wird nur angefasst, wenn dieses Sheet den Eintrag kennt
+  // (sonst hätte ein alter Toast das inzwischen neu geöffnete Sheet verfälscht).
+  function undoAddedItem(dayKey, mealId, id, key) {
+    deleteEntry(dayKey, mealId, id);
+    if (sheet && sheet.added && sheet.added.some(a => a.id === id)) {
+      sheet.added = sheet.added.filter(a => a.id !== id);
+      sheet.addedByKey[key] = Math.max(0, (sheet.addedByKey[key] || 0) - 1);
+      refreshAddedUi(key);
+    }
+    if (sheet) renderToday();
+    else renderAll();
+  }
+
+  function closeSheet() {
+    const booked = !!(sheet && sheet.added && sheet.added.length);
+    showSheet(false);
+    if (booked) renderAll();
+  }
+
   // --- Reiter: Schnell ---
 
   function sheetQuickBody() {
@@ -1874,13 +1949,17 @@
         : 'z. B. 2 Brötchen mit Käse und ein Cappuccino'}">${esc(ai.text || '')}</textarea>
       <div class="btn-row">
         <label class="btn file-btn">
-          ${ai.image ? 'Anderes Foto' : 'Foto aufnehmen/wählen'}
-          <input type="file" id="ai-photo" accept="image/*" capture="environment" hidden>
+          Foto aufnehmen
+          <input type="file" class="ai-photo" accept="image/*" capture="environment" hidden>
         </label>
-        <button class="btn primary" data-action="ai-analyze" ${ai.busy ? 'disabled' : ''}>
-          ${ai.busy ? 'Analysiere …' : 'Analysieren'}
-        </button>
-      </div>`;
+        <label class="btn file-btn">
+          Aus Fotos wählen
+          <input type="file" class="ai-photo" accept="image/*" hidden>
+        </label>
+      </div>
+      <button class="btn primary full" data-action="ai-analyze" ${ai.busy ? 'disabled' : ''}>
+        ${ai.busy ? 'Analysiere …' : 'Analysieren'}
+      </button>`;
 
     if (ai.image) {
       html += `<div class="ai-thumb"><img src="${ai.image.previewUrl}" alt="Foto der Mahlzeit">
@@ -2097,11 +2176,20 @@
         setAmountError(!valid);
       });
     }
-    const photo = $('#ai-photo');
-    if (photo) {
+    // Zwei Felder: Kamera (capture) und Fotothek/Dateien (ohne capture). Mit capture
+    // öffnet iOS direkt die Kamera – die Fotothek wäre sonst unerreichbar.
+    document.querySelectorAll('#sheet .ai-photo').forEach(photo => {
       photo.addEventListener('change', async () => {
         const file = photo.files && photo.files[0];
+        // Der Weg „Datei auswählen" kann alles liefern; Feld leeren, damit dieselbe
+        // Datei erneut gewählt werden kann (sonst feuert change nicht wieder).
+        photo.value = '';
         if (!file) return;
+        if (file.type && !file.type.startsWith('image/')) {
+          sheet.ai.error = 'Das ist keine Bilddatei. Bitte ein Foto wählen.';
+          renderSheet();
+          return;
+        }
         try {
           sheet.ai.image = await AI.resizeImage(file);
           sheet.ai.error = '';
@@ -2110,7 +2198,7 @@
         }
         renderSheet();
       });
-    }
+    });
     const aiText = $('#ai-text');
     if (aiText) {
       aiText.addEventListener('input', () => { sheet.ai.text = aiText.value; });
@@ -2256,7 +2344,7 @@
 
       // Sheet
       case 'open-sheet': openSheet(target.dataset.meal); break;
-      case 'close-sheet': showSheet(false); break;
+      case 'close-sheet': closeSheet(); break;
       case 'sheet-tab':
         sheet.tab = target.dataset.tab;
         sheet.food = null;
@@ -2299,16 +2387,9 @@
         toast('Eintrag hinzugefügt');
         break;
       }
-      case 'add-saved': {
-        const item = findSaved(target.dataset.key);
-        if (item) {
-          addEntry(currentDay, sheet.meal, item);
-          showSheet(false);
-          renderAll();
-          toast('Eintrag hinzugefügt');
-        }
+      case 'add-saved':
+        addSavedItem(target.dataset.key);
         break;
-      }
       case 'toggle-fav': {
         const item = findSaved(target.dataset.key);
         if (item) {

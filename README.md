@@ -13,6 +13,9 @@ Safari öffnen → Teilen → „Zum Home-Bildschirm", dann startet die App im V
   Angaben, zeigt der Balken ehrlich „≥ X g“ und wie viele Einträge ohne Angabe
   sind), vier Mahlzeiten mit Einträgen aus Datenbank (147 deutsche Lebensmittel,
   jeweils mit Ballaststoffwert), Favoriten, Schnelleingabe — auch für vergangene Tage.
+  Aus **Favoriten und „Zuletzt verwendet"** lässt sich mehrfach hintereinander buchen:
+  das Sheet bleibt offen, jeder Tap bucht (Zähler je Zeile), Schließen über × oder
+  Tippen daneben. Jede Buchung ist per „Rückgängig" im Hinweis zurücknehmbar.
 - **KI-Erkennung (optional):** Mahlzeit fotografieren oder als Freitext beschreiben,
   Claude schätzt die Nährwerte; zweiter Modus **„Etikett“** liest die
   Nährwerttabelle einer Packung exakt ab (pro 100 g und pro Portion). Wird erst
@@ -133,6 +136,8 @@ Bewusst überspringen lässt er sich mit `KT_SKIP_CACHE_CHECK=1 git commit …`.
 2. In der App: **Einstellungen → KI-Erkennung** → Key einfügen.
 3. Beim Eintragen einer Mahlzeit erscheint jetzt der Reiter **„KI“**: Foto
    aufnehmen oder Text eingeben → Vorschläge prüfen → übernehmen.
+   Für das Foto gibt es zwei Wege — **„Foto aufnehmen"** öffnet direkt die Kamera,
+   **„Aus Fotos wählen"** die Fotobibliothek bzw. die Dateien.
 
 **Kosten & Datenschutz:** Jede Analyse kostet typischerweise unter 1 Cent
 (Modell Claude Haiku). Foto bzw. Text werden dafür an die Anthropic-API

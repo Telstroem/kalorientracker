@@ -544,6 +544,24 @@ textarea { resize: vertical; }
 .star { font-size: 1.25rem; color: var(--muted); padding: 10px; flex-shrink: 0; }
 .star.on { color: #e8a33d; }
 
+/* Zähler je Zeile, solange das Sheet offen ist (Mehrfachbuchung). Gefüllte Pille
+   statt getönter Fläche: --accent-btn ist die Fläche, die weiße Schrift mit 4,5:1
+   trägt – bei 0,7 rem wäre eine hellere Tönung zu knapp. */
+.add-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: var(--accent-btn);
+  color: var(--accent-btn-text);
+  vertical-align: 1px;
+}
+.add-count:empty { display: none; }
+.sheet-count { font-size: 0.82rem; font-weight: 500; color: var(--muted); }
+.sheet-count:empty { display: none; }
+
 .back-link { color: var(--accent); font-weight: 600; font-size: 0.9rem; padding: 2px 0 10px; }
 
 .food-detail { text-align: center; }
@@ -725,6 +743,13 @@ input.input-error { box-shadow: 0 0 0 2px var(--warn); }
   text-align: center;
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+/* Bei offenem Sheet nach oben aus der Liste heraus: unten läge der Toast (z-index 70)
+   über den Zeilen – beim schnellen Mehrfachbuchen träfe ein Tap „Rückgängig“
+   statt des nächsten Lebensmittels. */
+body.sheet-open #toast {
+  top: calc(12px + env(safe-area-inset-top));
+  bottom: auto;
+}
 .toast-action {
   margin-left: 12px;
   color: var(--accent);
